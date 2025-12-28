@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Purchase Page - Row Click Test Instructions</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .test-card {
+            background: white;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2563eb;
+        }
+        h2 {
+            color: #1e40af;
+            border-bottom: 2px solid #3b82f6;
+            padding-bottom: 10px;
+        }
+        .step {
+            background: #eff6ff;
+            padding: 15px;
+            margin: 10px 0;
+            border-left: 4px solid #3b82f6;
+        }
+        .expected {
+            background: #f0fdf4;
+            padding: 10px;
+            margin: 10px 0;
+            border-left: 4px solid #22c55e;
+        }
+        .warning {
+            background: #fef3c7;
+            padding: 10px;
+            margin: 10px 0;
+            border-left: 4px solid #f59e0b;
+        }
+        code {
+            background: #e5e7eb;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+    </style>
+</head>
+<body>
+    <h1>🧪 Purchase Page - Row Click Functionality Test</h1>
+    
+    <div class="test-card">
+        <h2>📋 Test Instructions</h2>
+        
+        <div class="step">
+            <strong>Step 1: Open Purchase Page</strong>
+            <p>Navigate to: <code>http://localhost/Mormukut/purchase.php</code></p>
+            <p>Make sure you're logged in to the system.</p>
+        </div>
+        
+        <div class="step">
+            <strong>Step 2: Check Recent Purchases Table</strong>
+            <p>Look at the "Recent Purchases" section on the right side of the page.</p>
+            <div class="expected">
+                <strong>✅ Expected:</strong> You should see a list of recent purchase transactions with columns:
+                <ul>
+                    <li>ID & Date</li>
+                    <li>Party</li>
+                    <li>Weight & Type</li>
+                    <li>Amount</li>
+                    <li>Actions (Eye icon for view, Trash icon for delete)</li>
+                </ul>
+            </div>
+            <div class="warning">
+                <strong>⚠️ If table is empty:</strong> Create at least one purchase transaction first by filling out the form on the left.
+            </div>
+        </div>
+        
+        <div class="step">
+            <strong>Step 3: Test Row Click (Edit Functionality)</strong>
+            <p>Click anywhere on a purchase row (NOT on the action buttons).</p>
+            <div class="expected">
+                <strong>✅ Expected Behavior:</strong>
+                <ul>
+                    <li>The form on the left should populate with the transaction data</li>
+                    <li>Purchase ID label should show <code>(Editing)</code> in orange</li>
+                    <li>Submit button should change to orange and say "Update Purchase"</li>
+                    <li>Form border should turn orange (2px solid)</li>
+                    <li>Page should scroll to the form</li>
+                </ul>
+            </div>
+        </div>
+        
+        <div class="step">
+            <strong>Step 4: Test View/Print (Eye Icon)</strong>
+            <p>Click the blue eye icon in the Actions column.</p>
+            <div class="expected">
+                <strong>✅ Expected:</strong> A modal should appear showing the purchase receipt with options to:
+                <ul>
+                    <li>Send WhatsApp</li>
+                    <li>Print</li>
+                    <li>OK (close)</li>
+                </ul>
+            </div>
+        </div>
+        
+        <div class="step">
+            <strong>Step 5: Test Delete (Trash Icon)</strong>
+            <p>Click the red trash icon in the Actions column.</p>
+            <div class="expected">
+                <strong>✅ Expected:</strong> A confirmation dialog should appear showing:
+                <ul>
+                    <li>Receipt ID</li>
+                    <li>Weight</li>
+                    <li>Amount</li>
+                    <li>Warning: "This action cannot be undone!"</li>
+                </ul>
+                <p>If you confirm, the transaction should be deleted and the page should reload.</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="test-card">
+        <h2>🔍 Troubleshooting</h2>
+        
+        <div class="step">
+            <strong>Open Browser Console</strong>
+            <p>Press <code>F12</code> or <code>Ctrl+Shift+I</code> to open Developer Tools, then go to the Console tab.</p>
+            <p>Look for any error messages (shown in red).</p>
+        </div>
+        
+        <div class="step">
+            <strong>Check for JavaScript Errors</strong>
+            <p>Common errors to look for:</p>
+            <ul>
+                <li><code>$ is not defined</code> - jQuery not loaded</li>
+                <li><code>Swal is not defined</code> - SweetAlert2 not loaded</li>
+                <li><code>loadPurchaseForEdit is not a function</code> - Function not defined</li>
+            </ul>
+        </div>
+        
+        <div class="step">
+            <strong>Verify Data Attributes</strong>
+            <p>Right-click on a purchase row and select "Inspect Element".</p>
+            <p>Check if the <code>&lt;tr&gt;</code> element has these attributes:</p>
+            <ul>
+                <li><code>class="... selectable-row ..."</code></li>
+                <li><code>data-transaction-id="[number]"</code></li>
+                <li><code>data-receipt-id="[P...]"</code></li>
+                <li><code>data-transaction="[base64 string]"</code></li>
+            </ul>
+        </div>
+    </div>
+    
+    <div class="test-card">
+        <h2>🐛 If Nothing Happens When Clicking Rows</h2>
+        
+        <div class="warning">
+            <strong>Possible Causes:</strong>
+            <ol>
+                <li><strong>No transactions in database:</strong> Create a purchase first</li>
+                <li><strong>JavaScript not loaded:</strong> Check browser console for errors</li>
+                <li><strong>Event handler not attached:</strong> Refresh the page (Ctrl+F5)</li>
+                <li><strong>Data attributes missing:</strong> Check the HTML source</li>
+            </ol>
+        </div>
+        
+        <div class="step">
+            <strong>Quick Fix: Hard Refresh</strong>
+            <p>Press <code>Ctrl+Shift+R</code> (or <code>Ctrl+F5</code>) to clear cache and reload the page.</p>
+        </div>
+    </div>
+</body>
+</html>
