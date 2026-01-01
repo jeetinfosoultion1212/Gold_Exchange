@@ -193,16 +193,22 @@ function searchByReceiptId(receiptId) {
 function populateFormForEdit(data) {
     $('input[name="transaction_id"]').val(data.id);
     $('#receiptId').val(data.receipt_id);
-    $('#partyNameInput').val(data.party_name);
-    $('#receivedWeight').val(data.received_weight);
-    $('#purity').val(data.purity);
-    $('#issueWeight').val(data.delivered_weight);
-    $('#rate').val(data.rate);
-    $('#paymentAmount').val(data.payment_amount);
-    $('select[name="payment_method"]').val(data.payment_method);
-    $('select[name="payment_status"]').val(data.payment_status);
-    $('input[name="narration"]').val(data.narration);
-    $('input[name="date_of_transaction"]').val(data.date_of_transaction);
+    $('#partyNameInput').val(data.party_name || '');
+    $('#receivedWeight').val(data.received_weight || 0);
+    $('#purity').val(data.purity || 0);
+    $('#issueWeight').val(data.delivered_weight || data.issue_weight || 0);
+    $('#rate').val(data.rate || 0);
+    $('#paymentAmount').val(data.payment_amount || 0);
+    // Set default payment_method to 'Cash' if not provided
+    $('select[name="payment_method"]').val(data.payment_method || 'Cash');
+    $('input[name="payment_status"]').val(data.payment_status || 'Due');
+    $('input[name="narration"]').val(data.narration || '');
+    
+    // Format date for datetime-local input
+    if (data.date_of_transaction) {
+        const dateStr = data.date_of_transaction.replace(' ', 'T').substring(0, 16);
+        $('input[name="date_of_transaction"]').val(dateStr);
+    }
 
     // Show delete button and change button text
     $('#deleteBtn').removeClass('hidden');
@@ -213,6 +219,16 @@ function populateFormForEdit(data) {
     calculateFineWeight();
     calculateDifference();
     calculateAmount();
+    
+    // Update payment status after calculations
+    if (typeof updatePaymentStatus === 'function') {
+        updatePaymentStatus();
+    }
+    
+    // Load party dues if party name exists
+    if (data.party_name && typeof loadPartyDues === 'function') {
+        loadPartyDues(data.party_name);
+    }
 
     // Scroll to top of form
     $('html, body').animate({ scrollTop: 0 }, 500);

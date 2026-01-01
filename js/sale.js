@@ -3,6 +3,20 @@
 
 $(document).ready(function () {
     console.log('Sale.js loaded - initializing sale-specific features');
+    
+    // Verify receiptId element exists
+    if ($('#receiptId').length === 0) {
+        console.error('ERROR: receiptId element not found!');
+    } else {
+        console.log('receiptId element found');
+    }
+    
+    // Verify receiptSuggestions element exists
+    if ($('#receiptSuggestions').length === 0) {
+        console.error('ERROR: receiptSuggestions element not found!');
+    } else {
+        console.log('receiptSuggestions element found');
+    }
 
     let availableStocks = []; // Store stocks globally
     let selectedIndex = -1; // Track selected suggestion for keyboard navigation
@@ -155,6 +169,56 @@ $(document).ready(function () {
         const rate = parseFloat($('#rate').val()) || 0;
         const amount = weight * rate;
         $('#amount').val(amount.toFixed(2));
+        updatePaymentStatus(); // Update payment status when amount changes
+    }
+
+    // Update payment status dynamically
+    function updatePaymentStatus() {
+        const amount = parseFloat($('#amount').val()) || 0;
+        const paymentAmount = parseFloat($('#paymentAmount').val()) || 0;
+
+        let status = 'Due';
+        let statusClass = 'bg-red-100 text-red-700';
+        let statusIcon = 'fa-exclamation-circle';
+        
+        if (amount > 0 && paymentAmount >= amount) {
+            status = 'Paid';
+            statusClass = 'bg-green-100 text-green-700';
+            statusIcon = 'fa-check-circle';
+        } else if (paymentAmount > 0) {
+            status = 'Partial';
+            statusClass = 'bg-yellow-100 text-yellow-700';
+            statusIcon = 'fa-clock';
+        } else {
+            status = 'Due';
+            statusClass = 'bg-red-100 text-red-700';
+            statusIcon = 'fa-exclamation-circle';
+        }
+
+        // Update the hidden payment_status field
+        $('input[name="payment_status"]').val(status);
+        
+        // Update the visible payment status badge in outstanding balance section (if visible)
+        const badgeHtml = `<span class="px-2 py-0.5 rounded-full ${statusClass} text-xs font-semibold whitespace-nowrap">
+            <i class="fas ${statusIcon} mr-1"></i>${status}
+        </span>`;
+        $('#paymentStatusBadge').html(badgeHtml);
+        
+        // Update the standalone payment status badge (if outstanding balance is not shown)
+        $('#paymentStatusBadgeStandalone').html(badgeHtml);
+        
+        // Show/hide payment status sections based on outstanding balance visibility
+        const hasOutstanding = !$('#partyDueInfo').hasClass('hidden');
+        if (hasOutstanding) {
+            $('#paymentStatusInfo').addClass('hidden');
+        } else {
+            // Show standalone payment status if there's an amount to track
+            if (amount > 0) {
+                $('#paymentStatusInfo').removeClass('hidden');
+            } else {
+                $('#paymentStatusInfo').addClass('hidden');
+            }
+        }
     }
 
     // Validate stock before submission
@@ -248,6 +312,14 @@ $(document).ready(function () {
 
     // Event listeners for calculations
     $('#weight, #rate').on('input change', calculateAmount);
+    
+    // Auto-update payment status when payment amount changes
+    $('#paymentAmount').on('input', function () {
+        updatePaymentStatus();
+    });
+    
+    // Initialize payment status display on page load
+    updatePaymentStatus();
 
     // Prevent Enter key from submitting form on input fields - move to next field instead
     $('#exchangeForm input:not([type=submit])').on('keypress', function (e) {
@@ -302,53 +374,98 @@ $(document).ready(function () {
 
     // Handle Sale ID Search
     let receiptSearchTimeout = null;
-    $('#receiptId').on('input focus', function () {
-        const term = $(this).val();
+    
+    function loadReceiptSuggestions(term, showRecentIfEmpty = false) {
+        console.log('loadReceiptSuggestions called with term:', term, 'showRecentIfEmpty:', showRecentIfEmpty);
         clearTimeout(receiptSearchTimeout);
-
-        if (term.length < 1) {
-            $('#receiptSuggestions').addClass('hidden');
-            return;
-        }
-
+        
         receiptSearchTimeout = setTimeout(function () {
+            // If term is empty or we want to show recent, use empty string to get recent sales
+            const searchTerm = (showRecentIfEmpty || !term) ? '' : term;
+            console.log('Fetching receipts for term:', searchTerm || '(empty - showing recent)');
+            
             $.ajax({
                 url: '',
                 type: 'POST',
-                data: { action: 'search_receipt_ids', term: term },
+                data: { action: 'search_receipt_ids', term: searchTerm },
                 success: function (response) {
+                    console.log('Receipt search response received:', response.substring(0, 200));
                     try {
                         const receipts = JSON.parse(response);
+                        console.log('Parsed receipts count:', receipts.length, receipts);
                         const list = $('#receiptSuggestions');
+                        
+                        if (!list.length) {
+                            console.error('ERROR: receiptSuggestions element not found in DOM!');
+                            return;
+                        }
+                        
                         list.empty();
 
                         if (receipts.length > 0) {
                             receipts.forEach(function (r) {
+                                const labelParts = r.label ? r.label.split(' - ') : [];
+                                const partyInfo = labelParts.length > 1 ? labelParts[1] : (r.party_name || '');
                                 list.append(`
-                                    <div class="px-4 py-2 hover:bg-gray-100 cursor-pointer text-sm" 
+                                    <div class="px-4 py-2 hover:bg-blue-50 cursor-pointer text-sm border-b border-gray-100 transition" 
                                          data-id="${r.receipt_id}">
                                         <div class="font-bold text-gray-800">${r.receipt_id}</div>
-                                        <div class="text-xs text-gray-500">${r.label.split(' - ')[1] || ''}</div>
+                                        <div class="text-xs text-gray-500">${partyInfo}</div>
                                     </div>
                                 `);
                             });
-                            list.removeClass('hidden');
+                            list.removeClass('hidden').css('display', 'block');
+                            console.log('✓ Suggestions shown, count:', receipts.length, 'Element visible:', list.is(':visible'), 'Has hidden class:', list.hasClass('hidden'));
                         } else {
+                            // If no results and we were trying to show recent, that's fine - just hide
+                            // But if user was searching, maybe try showing recent as fallback
+                            if (showRecentIfEmpty && searchTerm === '') {
+                                console.log('No recent receipts found in database');
+                            }
                             list.addClass('hidden');
+                            console.log('No receipts found - hiding dropdown');
                         }
                     } catch (e) {
-                        console.error('Error parsing receipts', e);
+                        console.error('Error parsing receipts', e, 'Response:', response);
+                        $('#receiptSuggestions').addClass('hidden');
                     }
+                },
+                error: function (xhr, status, error) {
+                    console.error('AJAX Error searching receipts:', error, 'Status:', status, 'Response:', xhr.responseText);
+                    $('#receiptSuggestions').addClass('hidden');
                 }
             });
-        }, 300);
+        }, 100);
+    }
+    
+    // Separate handlers for better control
+    $('#receiptId').on('focus click', function (e) {
+        console.log('Sale ID field focused/clicked, current value:', $(this).val());
+        // Always show recent sales on focus/click, regardless of current value
+        loadReceiptSuggestions('', true);
+    });
+    
+    $('#receiptId').on('input', function () {
+        const term = $(this).val().trim();
+        console.log('Input event, term:', term);
+        // When typing, search for the term (don't force show recent)
+        loadReceiptSuggestions(term, false);
     });
 
     // Handle suggestion selection
-    $(document).on('click', '#receiptSuggestions div', function () {
+    $(document).on('click', '#receiptSuggestions > div', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        
         const receiptId = $(this).data('id');
+        console.log('Receipt selected:', receiptId);
+        
+        // Hide dropdown immediately - use both methods to ensure it's hidden
+        const suggestions = $('#receiptSuggestions');
+        suggestions.addClass('hidden').css('display', 'none').hide();
+        
+        // Set the receipt ID
         $('#receiptId').val(receiptId);
-        $('#receiptSuggestions').addClass('hidden');
 
         // Load transaction details
         $.ajax({
@@ -376,9 +493,26 @@ $(document).ready(function () {
                         $('#amount').val(t.gold_amount);
 
                         // Handle Payment
-                        $('#paidAmount').val(t.payment_amount);
-                        $('select[name="payment_method"]').val(t.payment_method);
-                        $('input[name="narration"]').val(t.narration);
+                        $('#paymentAmount').val(t.payment_amount || 0);
+                        $('select[name="payment_method"]').val(t.payment_method || 'Cash');
+                        if (t.payment_status) {
+                            $('input[name="payment_status"]').val(t.payment_status);
+                        } else {
+                            // Determine payment status based on payment amount
+                            const paymentAmount = parseFloat(t.payment_amount || 0);
+                            const totalAmount = parseFloat(t.gold_amount || 0);
+                            if (paymentAmount >= totalAmount) {
+                                $('input[name="payment_status"]').val('Paid');
+                            } else if (paymentAmount > 0) {
+                                $('input[name="payment_status"]').val('Partial');
+                            } else {
+                                $('input[name="payment_status"]').val('Due');
+                            }
+                        }
+                        $('input[name="narration"]').val(t.narration || '');
+                        
+                        // Recalculate amount type display
+                        calculateAmount();
 
                         // Update UI state
                         $('#submitText').text('Update Sale');
@@ -393,10 +527,331 @@ $(document).ready(function () {
     });
 
     // Hide suggestions on click outside
-    $(document).click(function (e) {
+    $(document).on('click', function (e) {
         if (!$(e.target).closest('#receiptId, #receiptSuggestions').length) {
-            $('#receiptSuggestions').addClass('hidden');
+            $('#receiptSuggestions').addClass('hidden').css('display', 'none').hide();
         }
+    });
+    
+    // Hide suggestions when input loses focus (with delay to allow click on suggestion)
+    $('#receiptId').on('blur', function (e) {
+        // Small delay to allow click events on suggestions to fire first
+        setTimeout(function () {
+            const activeElement = document.activeElement;
+            // Only hide if focus didn't move to a suggestion item
+            if (!$(activeElement).closest('#receiptSuggestions').length) {
+                $('#receiptSuggestions').addClass('hidden').css('display', 'none').hide();
+            }
+        }, 200);
+    });
+    
+    // Also hide when clicking on the input field itself (to prevent re-showing immediately)
+    $('#receiptId').on('blur', function (e) {
+        // Small delay to allow click events on suggestions to fire first
+        setTimeout(function () {
+            if (!$(document.activeElement).closest('#receiptSuggestions').length) {
+                $('#receiptSuggestions').addClass('hidden').css('display', 'none');
+            }
+        }, 200);
+    });
+
+    // Handle Edit button click from transaction list
+    $(document).on('click', '.edit-sale-btn', function (e) {
+        e.preventDefault();
+        const receiptId = $(this).data('receipt-id');
+        if (receiptId) {
+            $('#receiptId').val(receiptId);
+            $('#receiptSuggestions').addClass('hidden');
+            
+            // Load transaction details directly
+            $.ajax({
+                url: '',
+                type: 'POST',
+                data: { action: 'get_exchange_by_receipt_id', receipt_id: receiptId },
+                success: function (response) {
+                    try {
+                        const res = JSON.parse(response);
+                        if (res.status === 'success') {
+                            const t = res.data;
+                            // Populate form with Sale details
+                            $('input[name="transaction_id"]').val(t.id);
+                            $('input[name="date_of_transaction"]').val(t.date_of_transaction.replace(' ', 'T'));
+
+                            // Handle Party
+                            $('#partyNameInput').val(t.party_name).addClass('border-green-500');
+                            window.selectedPartyName = t.party_name;
+
+                            // Handle Sale Fields
+                            $('#weight').val(t.gold_weight);
+                            $('#purity').val(t.purity);
+                            $('#rate').val(t.rate);
+                            $('#amount').val(t.gold_amount);
+
+                            // Handle Payment
+                            $('#paymentAmount').val(t.payment_amount || 0);
+                            $('select[name="payment_method"]').val(t.payment_method || 'Cash');
+                            $('input[name="payment_status"]').val(t.payment_status || 'Due');
+                            $('input[name="narration"]').val(t.narration || '');
+                            
+                            // Recalculate amount type display
+                            calculateAmount();
+
+                            // Update UI state
+                            $('#submitText').text('Update Sale');
+                            $('#submitIcon').removeClass('fa-save').addClass('fa-edit');
+                            $('#deleteBtn').removeClass('hidden');
+                            
+                            // Scroll to form
+                            $('html, body').animate({
+                                scrollTop: $('#exchangeForm').offset().top - 100
+                            }, 500);
+                        } else {
+                            Swal.fire({
+                                icon: 'error',
+                                title: 'Error',
+                                text: res.message || 'Transaction not found'
+                            });
+                        }
+                    } catch (e) {
+                        console.error('Error loading transaction', e);
+                        Swal.fire({
+                            icon: 'error',
+                            title: 'Error',
+                            text: 'Failed to load transaction details'
+                        });
+                    }
+                },
+                error: function (xhr, status, error) {
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Error',
+                        text: 'Failed to load transaction: ' + error
+                    });
+                }
+            });
+        }
+    });
+
+    // Handle Delete button click from transaction list
+    $(document).on('click', '.delete-sale-btn', function (e) {
+        e.preventDefault();
+        const transactionId = $(this).data('id');
+        const receiptId = $(this).data('receipt-id');
+        
+        Swal.fire({
+            icon: 'warning',
+            title: 'Delete Sale Transaction?',
+            text: `Are you sure you want to delete sale ${receiptId}? This action cannot be undone.`,
+            showCancelButton: true,
+            confirmButtonColor: '#d33',
+            cancelButtonColor: '#3085d6',
+            confirmButtonText: 'Yes, Delete',
+            cancelButtonText: 'Cancel'
+        }).then((result) => {
+            if (result.isConfirmed) {
+                $.ajax({
+                    url: '',
+                    type: 'POST',
+                    data: {
+                        action: 'delete_transaction',
+                        id: transactionId
+                    },
+                    success: function (response) {
+                        try {
+                            const result = JSON.parse(response);
+                            if (result.status === 'success') {
+                                Swal.fire({
+                                    icon: 'success',
+                                    title: 'Deleted!',
+                                    text: result.message,
+                                    showConfirmButton: false,
+                                    timer: 1500
+                                }).then(() => {
+                                    location.reload();
+                                });
+                            } else {
+                                Swal.fire({
+                                    icon: 'error',
+                                    title: 'Error',
+                                    text: result.message
+                                });
+                            }
+                        } catch (e) {
+                            console.error('Error parsing delete response', e);
+                            Swal.fire({
+                                icon: 'error',
+                                title: 'Error',
+                                text: 'Failed to delete transaction'
+                            });
+                        }
+                    },
+                    error: function (xhr, status, error) {
+                        Swal.fire({
+                            icon: 'error',
+                            title: 'Error',
+                            text: 'Failed to delete transaction: ' + error
+                        });
+                    }
+                });
+            }
+        });
+    });
+
+    // Handle Delete button in form
+    $('#deleteBtn').on('click', function (e) {
+        e.preventDefault();
+        const transactionId = $('input[name="transaction_id"]').val();
+        
+        if (!transactionId) {
+            Swal.fire({
+                icon: 'warning',
+                title: 'No Transaction Selected',
+                text: 'Please select a transaction to delete'
+            });
+            return;
+        }
+
+        Swal.fire({
+            icon: 'warning',
+            title: 'Delete Sale Transaction?',
+            text: 'Are you sure you want to delete this sale transaction? This action cannot be undone.',
+            showCancelButton: true,
+            confirmButtonColor: '#d33',
+            cancelButtonColor: '#3085d6',
+            confirmButtonText: 'Yes, Delete',
+            cancelButtonText: 'Cancel'
+        }).then((result) => {
+            if (result.isConfirmed) {
+                $.ajax({
+                    url: '',
+                    type: 'POST',
+                    data: {
+                        action: 'delete_transaction',
+                        id: transactionId
+                    },
+                    success: function (response) {
+                        try {
+                            const result = JSON.parse(response);
+                            if (result.status === 'success') {
+                                Swal.fire({
+                                    icon: 'success',
+                                    title: 'Deleted!',
+                                    text: result.message,
+                                    showConfirmButton: false,
+                                    timer: 1500
+                                }).then(() => {
+                                    location.reload();
+                                });
+                            } else {
+                                Swal.fire({
+                                    icon: 'error',
+                                    title: 'Error',
+                                    text: result.message
+                                });
+                            }
+                        } catch (e) {
+                            console.error('Error parsing delete response', e);
+                            Swal.fire({
+                                icon: 'error',
+                                title: 'Error',
+                                text: 'Failed to delete transaction'
+                            });
+                        }
+                    },
+                    error: function (xhr, status, error) {
+                        Swal.fire({
+                            icon: 'error',
+                            title: 'Error',
+                            text: 'Failed to delete transaction: ' + error
+                        });
+                    }
+                });
+            }
+        });
+    });
+
+    // Handle Reset Form button
+    $('#resetFormBtn').on('click', function (e) {
+        e.preventDefault();
+        $('#exchangeForm')[0].reset();
+        $('input[name="transaction_id"]').val('');
+        $('#deleteBtn').addClass('hidden');
+        $('#submitText').text('Save');
+        $('#submitIcon').removeClass('fa-edit').addClass('fa-save');
+        $('#partyNameInput').removeClass('border-green-500');
+        $('#partyDueInfo').addClass('hidden');
+        $('#paymentStatusInfo').addClass('hidden');
+        loadNextReceiptId();
+        updatePaymentStatus(); // Reset payment status display
+    });
+    
+    // Load party dues when party is selected (override or extend gold_exchange.js selectParty)
+    // This will be called by gold_exchange.js selectParty function, but we ensure it works
+    if (typeof loadPartyDues === 'undefined') {
+        window.loadPartyDues = function(partyName) {
+            console.log('loadPartyDues (sale.js fallback) called for:', partyName);
+            if (!partyName || partyName.trim() === '') {
+                console.log('Party name is empty, skipping');
+                $('#partyDueInfo').addClass('hidden');
+                return;
+            }
+            
+            $.ajax({
+                url: '',
+                method: 'POST',
+                data: {
+                    action: 'get_party_dues',
+                    party_name: partyName
+                },
+                dataType: 'json',
+                success: function (data) {
+                    console.log('Party dues response (sale.js):', data);
+                    if (data && (parseFloat(data.due_amount) > 0 || parseFloat(data.due_gold) > 0)) {
+                        $('#dueAmountValue').text('₹' + parseFloat(data.due_amount).toFixed(2));
+                        $('#dueGoldValue').text(parseFloat(data.due_gold).toFixed(3) + 'g');
+                        $('#partyDueInfo').removeClass('hidden').show();
+                        $('#paymentStatusInfo').addClass('hidden'); // Hide standalone when outstanding is shown
+                        console.log('Outstanding balance displayed (sale.js)');
+                    } else {
+                        $('#partyDueInfo').addClass('hidden');
+                        console.log('No outstanding balance (sale.js)');
+                    }
+                    // Update payment status visibility after loading dues
+                    updatePaymentStatus();
+                },
+                error: function (xhr, status, error) {
+                    console.error('Error loading party dues (sale.js):', error, xhr.responseText);
+                    $('#partyDueInfo').addClass('hidden');
+                }
+            });
+        };
+    } else {
+        // Override the existing function to add logging
+        const originalLoadPartyDues = window.loadPartyDues;
+        window.loadPartyDues = function(partyName) {
+            console.log('loadPartyDues (override) called for:', partyName);
+            originalLoadPartyDues(partyName);
+        };
+    }
+    
+    // Also trigger on party input change (when manually typed and selected)
+    $('#partyNameInput').on('blur', function() {
+        const partyName = $(this).val().trim();
+        console.log('Party input blurred, value:', partyName);
+        if (partyName && typeof loadPartyDues === 'function') {
+            loadPartyDues(partyName);
+        }
+    });
+    
+    // Also trigger when party is selected from dropdown (in case selectParty doesn't call it)
+    $(document).on('click', '.party-item', function() {
+        setTimeout(function() {
+            const partyName = $('#partyNameInput').val().trim();
+            console.log('Party item clicked, party name:', partyName);
+            if (partyName && typeof loadPartyDues === 'function') {
+                loadPartyDues(partyName);
+            }
+        }, 100);
     });
 });
 
@@ -423,6 +878,11 @@ window.saveTransaction = function () {
                 }).then((result) => {
                     if (result.isConfirmed && response.transaction_id) {
                         window.open('print_sale_receipt.php?id=' + response.transaction_id, '_blank');
+                    }
+                    // Refresh party balance display before reload
+                    const partyName = $('#partyNameInput').val().trim();
+                    if (partyName && typeof loadPartyDues === 'function') {
+                        loadPartyDues(partyName);
                     }
                     window.location.reload();
                 });

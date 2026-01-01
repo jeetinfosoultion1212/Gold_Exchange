@@ -1,0 +1,39 @@
+Balance Update Test
+Party ID: 1
+Company ID: 9
+Balance Change: 1364.1
+Due Amount: 1364.1
+Time: 2026-01-01 02:27:23
+=== BALANCE UPDATE TEST ===
+Time: 2026-01-01 03:23:10
+Party ID: 6
+Amount: 54564
+Payment: 0
+Due Amount: 54564
+Is Edit: Yes (ID: 7)
+Original Due Amount: 54564
+REVERTED: -54564
+Balance Before: -54564.00
+Executing: UPDATE parties SET current_balance = current_balance + 54564 WHERE id = 6
+Affected Rows: 1
+Balance After: 0.00
+Change: 54564 (Expected: 54564)
+===========================
+
+=== BALANCE UPDATE TEST ===
+Time: 2026-01-01 03:55:51
+Party ID: 7
+Amount: 68205
+Payment: 0
+Due Amount: 68205
+Is Edit: Yes (ID: 8)
+Original Due Amount: 68205
+REVERTED: -68205
+Balance Before: -68205.00
+Executing: UPDATE parties SET current_balance = current_balance + 68205 WHERE id = 7
+Affected Rows: 1
+Balance After: 0.00
+Change: 68205 (Expected: 68205)
+Balance AFTER COMMIT: 0.00
+===========================
+

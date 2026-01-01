@@ -24,6 +24,11 @@ $user_id = $_SESSION['user_id'];
 
 // Handle AJAX request
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'save_sell') {
+    // Debug: Log all POST data
+    error_log("=== SAVE_SELL POST DATA ===");
+    error_log(print_r($_POST, true));
+    error_log("===========================");
+    
     $conn->begin_transaction();
     
     try {
@@ -31,14 +36,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $receipt_id = $conn->real_escape_string($_POST['receipt_id']);
         $party_id = intval($_POST['party_id']);
         $date_of_transaction = $conn->real_escape_string($_POST['date_of_transaction']);
-        $sell_weight = floatval($_POST['sell_weight']);
+        // Accept both 'sell_weight' and 'weight' field names
+        $sell_weight = floatval($_POST['sell_weight'] ?? $_POST['weight'] ?? 0);
         $purity = floatval($_POST['purity']);
         $rate = floatval($_POST['rate']);
         // Remove commas and parse amount (handles Indian number format)
         $amount = floatval(str_replace(',', '', $_POST['amount']));
         $additional_cash = floatval($_POST['additional_cash'] ?? 0);
         $additional_bank = floatval($_POST['additional_bank'] ?? 0);
-        $bank_payment_type = $conn->real_escape_string($_POST['bank_payment_type'] ?? '');
+        $bank_payment_type = $conn->real_escape_string($_POST['bank_payment_type'] ?? $_POST['payment_method'] ?? '');
         $narration = $conn->real_escape_string($_POST['narration'] ?? '');
         
         // Get payment_type and convert to proper case for booking_type column

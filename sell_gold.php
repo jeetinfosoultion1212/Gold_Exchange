@@ -245,10 +245,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $rate = floatval($_POST['rate']);
                     $gold_amount = floatval($_POST['amount']);
                     
-                    // Naming convention from form: 'additional_bank' is the Paid Amount
-                    $payment_amount = floatval($_POST['additional_bank'] ?? 0);
+                    // Get payment amount from either cash or bank field
+                    $additional_cash = floatval($_POST['additional_cash'] ?? 0);
+                    $additional_bank = floatval($_POST['additional_bank'] ?? 0);
+                    $payment_amount = max($additional_cash, $additional_bank); // Use whichever is greater
                     $payment_method = $conn->real_escape_string($_POST['payment_method'] ?? 'Cash');
                     $narration = $conn->real_escape_string($_POST['narration'] ?? '');
+                    
+                    // DEBUG: Log received values
+                    error_log("=== SAVE_SELL BACKEND DEBUG ===");
+                    error_log("sell_weight from POST: " . ($_POST['sell_weight'] ?? 'NOT SET'));
+                    error_log("gold_weight parsed: " . $gold_weight);
+                    error_log("amount from POST: " . ($_POST['amount'] ?? 'NOT SET'));
+                    error_log("gold_amount parsed: " . $gold_amount);
+                    error_log("additional_cash: " . $additional_cash);
+                    error_log("additional_bank: " . $additional_bank);
+                    error_log("payment_amount: " . $payment_amount);
+                    error_log("================================");
 
                     // Validation
                     if (empty($receipt_id) || empty($party_id) || $gold_weight <= 0) {
@@ -277,20 +290,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $balance_change = $gold_amount - $payment_amount;
                     $current_balance_after = $current_balance_before + $balance_change;
                     
-                    // Insert Transaction
+                    // Determine payment status for the Sale transaction
+                    if ($payment_amount >= $gold_amount) {
+                        $payment_status = 'Paid';
+                    } elseif ($payment_amount > 0) {
+                        $payment_status = 'Partial';
+                    } else {
+                        $payment_status = 'Due';
+                    }
+                    
+                    // Set payment_method to NULL if no payment was made
+                    $sale_payment_method = ($payment_amount > 0) ? $payment_method : null;
+                    
+                    // Insert Sale Transaction (with payment reference for tracking)
                     $sql = "INSERT INTO transactions (
                         company_id, party_id, receipt_id, transaction_type, date_of_transaction,
-                        gold_weight, purity, rate, gold_amount, payment_amount, payment_method, payment_type,
+                        gold_weight, purity, rate, gold_amount, payment_amount, payment_method, payment_status,
                         party_balance_before, party_balance_after, narration
                     ) VALUES (
                         ?, ?, ?, 'Sale', ?,
-                        ?, ?, ?, ?, ?, ?, 'Payment_In',
+                        ?, ?, ?, ?, ?, ?, ?,
                         ?, ?, ?
                     )";
                     $stmt = $conn->prepare($sql);
-                    $stmt->bind_param("iissdddddsdds", 
+                    $stmt->bind_param("iissdddddssddss", 
                         $company_id, $party_id, $receipt_id, $date_of_transaction,
-                        $gold_weight, $purity, $rate, $gold_amount, $payment_amount, $payment_method,
+                        $gold_weight, $purity, $rate, $gold_amount, $payment_amount, $sale_payment_method, $payment_status,
                         $current_balance_before, $current_balance_after, $narration
                     );
                     
@@ -300,45 +325,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $transaction_id = $stmt->insert_id;
 
                     // Update Party Balance
-                    // If Payment is Cash: Cash Balance increases (or party cash debt increases?)
-                    // Usually: current_balance = cash_balance + bank_balance.
-                    // If we receive cash, our Cash in Hand increases. But Party's cash balance usually tracks what they owe us in cash?
-                    // Let's look at `purchase.php` logic again.
-                    // Purchase (Money Out): Cash Pay -> Cash Balance `+` (Balance Reversal Logic in purchase.php says +).
-                    // Wait, `purchase.php`: `current_balance = ... + balance_change`. `cash_balance = cash_balance + cash_amount`.
-                    // If Purchase means we pay them, `cash_balance` increasing means... ?
-                    // Actually, usually `parties` table balances track what THEY owe US.
-                    // If we Sell 100k, they owe 100k. `current_balance` += 100k.
-                    // If they Pay 100k Cash, they owe 0. `current_balance` -= 100k.
-                    // `cash_balance`: If they pay us cash, does their cash balance go down or up?
-                    // If `current_balance` = `cash_balance` + `bank_balance`.
-                    // Sale (Credit): `current_balance` up. `cash/bank` up?
-                    // Let's assume standard logic:
-                    // Update `current_balance` by net change.
-                    // If payment is Cash: `cash_balance` change = `balance_change`?
-                    // No. Allocation of "Booking Type" matters for `cash_booking` vs `bank_booking`.
-                    // But here we don't have explicit booking type split in UI, just `payment_method`.
-                    // Simplification: We update `cash_balance` or `bank_balance` based on Payment Method.
-                    // If Cash Payment: `cash_balance` += `balance_change` ?
-                    // No. Gold Sale is usually "Booking" or "Sale". 
-                    // Let's follow the `purchase.php` pattern strictly but reversed sign.
-                    // Purchase: `balance_change = -purchase + payment`.
-                    // Sale: `balance_change = +sale - payment` (My logic above).
-                    // Purchase: `cash_balance = cash_balance + cash_amount` (Payment).
-                    // Wait, Purchase Payment means we GIVE money. So `cash_balance` (their balance w.r.t us) should DECREASE?
-                    // Unless `cash_balance` in `parties` means "What we owe them".
-                    // If Purchase: We buy 10k. We owe 10k. (+10k to their credit).
-                    // We pay 10k. We owe 0. (-10k).
-                    // `purchase.php` line 196: `balance_change = -purchase + payment`.
-                    // This implies `purchase` REDUCES balance. So Balance = "What THEY owe US" (Debit).
-                    // If we buy, they owe us LESS (or we owe them more). Correct.
-                    // If we pay, they owe us MORE (or we owe them less). Correct.
-                    
-                    // So for SALE:
-                    // Sale: they owe us MORE (+). `balance_change = +sale`
-                    // Receive Payment: they owe us LESS (-). `balance_change = -payment`.
-                    // Net: `sale - payment`. Correct.
-                    
                     $new_current = $current_balance_after; // Calculated above
                     
                     if ($payment_method == 'Cash') {
@@ -374,13 +360,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                          $ins_stock->execute();
                     }
                     
-                    // Update Account Balance (Shop's Physical Cash/Bank)
-                    // We Received Payment -> Shop Balance Increases (+)
+                    // Create separate "Received" transaction entry if payment was made
+                    // Following the same pattern as gold_exchange.php
                     require_once __DIR__ . '/handlers/account_balance_helper.php';
+                    
                     if ($payment_amount > 0) {
+                        $user_id = $_SESSION['user_id'];
+                        $received_receipt_id = 'RCV-' . $receipt_id . '-' . rand(1000, 9999);
+                        $received_narration = "Payment received for Sale " . $receipt_id;
+                        
+                        $received_sql = "INSERT INTO transactions (
+                            company_id, user_id, receipt_id, party_id, date_of_transaction,
+                            transaction_type, payment_type, payment_method, payment_amount,
+                            narration, payment_status, due_amount, amount
+                        ) VALUES (?, ?, ?, ?, ?, 'Received', 'Payment_In', ?, ?, ?, 'Paid', 0, ?)";
+                        
+                        $received_stmt = $conn->prepare($received_sql);
+                        $received_stmt->bind_param(
+                            "iisissdsd",
+                            $company_id, $user_id, $received_receipt_id, $party_id, $date_of_transaction,
+                            $payment_method, $payment_amount, $received_narration, $payment_amount
+                        );
+                        
+                        if (!$received_stmt->execute()) {
+                            throw new Exception("Failed to save payment received transaction: " . $received_stmt->error);
+                        }
+                        
+                        // Update Account Balance (Shop's Physical Cash/Bank)
+                        // We Received Payment -> Shop Balance Increases (+)
                         if ($payment_method == 'Cash') {
                              updateAccountBalance($conn, $company_id, 'Cash', $payment_amount);
-                        } else {
+                        } elseif (in_array($payment_method, ['Bank', 'UPI', 'Cheque', 'NEFT', 'RTGS'])) {
                              updateAccountBalance($conn, $company_id, 'Bank', $payment_amount);
                         }
                     }
@@ -390,15 +400,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'status' => 'success',
                         'message' => 'Sale saved successfully',
                         'data' => [
+                             'transaction_id' => $transaction_id,
                              'receipt_id' => $receipt_id,
-                             // ... data for receipt printing ...
                              'party_name' => $party_name,
                              'date_of_transaction' => $date_of_transaction,
                              'gold_weight' => $gold_weight,
                              'purity' => $purity,
                              'rate' => $rate,
                              'gold_amount' => $gold_amount,
-                             'payment_amount' => $payment_amount
+                             'payment_amount' => $payment_amount,
+                             'payment_method' => $payment_method,
+                             'payment_status' => $payment_status
                         ]
                     ]);
                 } catch (Exception $e) {
@@ -546,6 +558,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 // This is simpler and reuses the save_sell logic
                 try {
                     $conn->begin_transaction();
+                    require_once __DIR__ . '/handlers/account_balance_helper.php';
                     
                     $original_receipt_id = trim($conn->real_escape_string($_POST['original_receipt_id'] ?? ''));
                     
@@ -581,7 +594,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $original_purity = $original_transaction['purity'];
                     $original_booking_type = $original_transaction['booking_type'] ?? 'Cash';
                     
-                    // Delete all related transactions (payments, advance settlements)
+                    // First, revert account balances for linked "Received" transactions
+                    $get_linked_sql = "SELECT payment_amount, payment_method, transaction_type FROM transactions WHERE company_id = ? AND narration LIKE ? AND transaction_type = 'Received'";
+                    $linked_pattern = "%Payment received for Sale " . $original_receipt_id . "%";
+                    $get_linked_stmt = $conn->prepare($get_linked_sql);
+                    $get_linked_stmt->bind_param("is", $company_id, $linked_pattern);
+                    $get_linked_stmt->execute();
+                    $linked_result = $get_linked_stmt->get_result();
+                    
+                    while ($old_linked = $linked_result->fetch_assoc()) {
+                        $old_amt = floatval($old_linked['payment_amount']);
+                        $old_method = $old_linked['payment_method'];
+                        
+                        // Reversal Logic: If it was Received (we got money), we remove it (Subtract).
+                        $reversal_amt = -$old_amt;
+                        
+                        if ($old_method === 'Cash') {
+                           updateAccountBalance($conn, $company_id, 'Cash', $reversal_amt);
+                        } elseif (in_array($old_method, ['Bank', 'UPI', 'Cheque', 'NEFT', 'RTGS'])) {
+                           updateAccountBalance($conn, $company_id, 'Bank', $reversal_amt);
+                        }
+                    }
+                    
+                    // Delete all related transactions (payments, advance settlements, received)
                     $delete_related_sql = "DELETE FROM transactions WHERE narration LIKE ? AND company_id = ?";
                     $search_pattern = "%{$original_receipt_id}%";
                     $delete_stmt = $conn->prepare($delete_related_sql);
@@ -634,6 +669,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             case 'delete_sale':
                 $conn->begin_transaction();
                 try {
+                    require_once __DIR__ . '/handlers/account_balance_helper.php';
+                    
                     $sale_id = intval($_POST['sale_id'] ?? 0);
                     $receipt_id = $conn->real_escape_string($_POST['receipt_id'] ?? '');
                     
@@ -664,10 +701,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $sale_purity = $sale['purity'];
                     $sale_booking_type = $sale['booking_type'] ?? 'Cash';
                     
-                    // Delete all linked payment transactions
+                    // First, revert account balances for linked "Received" transactions
+                    $get_linked_sql = "SELECT payment_amount, payment_method, transaction_type FROM transactions WHERE company_id = ? AND narration LIKE ? AND transaction_type = 'Received'";
+                    $linked_pattern = "%Payment received for Sale " . $sale_receipt_id . "%";
+                    $get_linked_stmt = $conn->prepare($get_linked_sql);
+                    $get_linked_stmt->bind_param("is", $company_id, $linked_pattern);
+                    $get_linked_stmt->execute();
+                    $linked_result = $get_linked_stmt->get_result();
+                    
+                    while ($old_linked = $linked_result->fetch_assoc()) {
+                        $old_amt = floatval($old_linked['payment_amount']);
+                        $old_method = $old_linked['payment_method'];
+                        
+                        // Reversal Logic: If it was Received (we got money), we remove it (Subtract).
+                        $reversal_amt = -$old_amt;
+                        
+                        if ($old_method === 'Cash') {
+                           updateAccountBalance($conn, $company_id, 'Cash', $reversal_amt);
+                        } elseif (in_array($old_method, ['Bank', 'UPI', 'Cheque', 'NEFT', 'RTGS'])) {
+                           updateAccountBalance($conn, $company_id, 'Bank', $reversal_amt);
+                        }
+                    }
+                    
+                    // Delete all linked payment transactions (Received, Payment, Advance_Settlement)
                     $delete_payments = "DELETE FROM transactions 
                                       WHERE narration LIKE ? 
-                                      AND transaction_type IN ('Payment', 'Advance_Settlement') 
+                                      AND transaction_type IN ('Payment', 'Advance_Settlement', 'Received') 
                                       AND company_id = ?";
                     $search_pattern = "%{$sale_receipt_id}%";
                     $del_pay_stmt = $conn->prepare($delete_payments);
@@ -1728,10 +1787,28 @@ if ($total_result && $transactions) {
                         </div>
                     </div>
 
-                    <!-- Hidden fields -->
-                    <input type="hidden" name="payment_status" value="Due">
-                    <input type="hidden" name="payment_type" id="paymentType" value="Payment_Out">
-                    <input type="hidden" name="additional_cash" id="additionalCash" value="0">
+                    <!-- Debug: Make hidden fields visible -->
+                    <div class="bg-red-50 p-3 border-t border-red-200">
+                        <h4 class="text-xs font-bold text-red-700 mb-2">DEBUG: Hidden Field Values</h4>
+                        <div class="grid grid-cols-3 gap-2">
+                            <div>
+                                <label class="block text-xs text-red-600">payment_status</label>
+                                <input type="text" name="payment_status" value="Due" class="w-full px-2 py-1 text-xs border rounded">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-red-600">payment_type</label>
+                                <input type="text" name="payment_type" id="paymentType" value="Payment_Out" class="w-full px-2 py-1 text-xs border rounded">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-red-600">additional_cash</label>
+                                <input type="text" name="additional_cash" id="additionalCash" value="0" class="w-full px-2 py-1 text-xs border rounded bg-yellow-100">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-red-600">additional_bank</label>
+                                <input type="text" name="additional_bank" id="additionalBank" value="0" class="w-full px-2 py-1 text-xs border rounded bg-yellow-100">
+                            </div>
+                        </div>
+                    </div>
                 </form>
             </div>
 
@@ -3136,6 +3213,82 @@ if ($total_result && $transactions) {
                 }
             });
 
+            // Show Sale Success Modal with Print Option
+            function showSaleSuccess(message, saleData) {
+                return Swal.fire({
+                    icon: 'success',
+                    title: '<div style="font-size: 24px; font-weight: 700; color: #059669;">Sale Completed!</div>',
+                    html: `
+                        <div style="font-family: 'Poppins', sans-serif; text-align: left; padding: 10px;">
+                            <div style="background: #f0fdf4; border: 2px solid #86efac; border-radius: 12px; padding: 16px; margin-bottom: 16px;">
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 14px;">
+                                    <div>
+                                        <div style="color: #6b7280; font-size: 12px; margin-bottom: 4px;">Receipt ID</div>
+                                        <div style="font-weight: 600; color: #1f2937;">${saleData.receipt_id || 'N/A'}</div>
+                                    </div>
+                                    <div>
+                                        <div style="color: #6b7280; font-size: 12px; margin-bottom: 4px;">Customer</div>
+                                        <div style="font-weight: 600; color: #1f2937;">${saleData.party_name || 'N/A'}</div>
+                                    </div>
+                                    <div>
+                                        <div style="color: #6b7280; font-size: 12px; margin-bottom: 4px;">Weight</div>
+                                        <div style="font-weight: 600; color: #1f2937;">${parseFloat(saleData.gold_weight || 0).toFixed(3)}g</div>
+                                    </div>
+                                    <div>
+                                        <div style="color: #6b7280; font-size: 12px; margin-bottom: 4px;">Purity</div>
+                                        <div style="font-weight: 600; color: #1f2937;">${parseFloat(saleData.purity || 0).toFixed(2)}%</div>
+                                    </div>
+                                    <div>
+                                        <div style="color: #6b7280; font-size: 12px; margin-bottom: 4px;">Rate</div>
+                                        <div style="font-weight: 600; color: #1f2937;">₹${parseFloat(saleData.rate || 0).toLocaleString('en-IN')}/g</div>
+                                    </div>
+                                    <div>
+                                        <div style="color: #6b7280; font-size: 12px; margin-bottom: 4px;">Total Amount</div>
+                                        <div style="font-weight: 700; color: #059669; font-size: 16px;">₹${parseFloat(saleData.gold_amount || 0).toLocaleString('en-IN')}</div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            ${saleData.payment_amount > 0 ? `
+                            <div style="background: #fef3c7; border: 2px solid #fbbf24; border-radius: 12px; padding: 16px;">
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 14px;">
+                                    <div>
+                                        <div style="color: #92400e; font-size: 12px; margin-bottom: 4px;">Payment Received</div>
+                                        <div style="font-weight: 700; color: #b45309; font-size: 16px;">₹${parseFloat(saleData.payment_amount || 0).toLocaleString('en-IN')}</div>
+                                    </div>
+                                    <div>
+                                        <div style="color: #92400e; font-size: 12px; margin-bottom: 4px;">Payment Method</div>
+                                        <div style="font-weight: 600; color: #92400e;">${saleData.payment_method || 'N/A'}</div>
+                                    </div>
+                                    <div style="grid-column: 1 / -1;">
+                                        <div style="color: #92400e; font-size: 12px; margin-bottom: 4px;">Status</div>
+                                        <div style="font-weight: 600; color: #b45309;">${saleData.payment_status || 'N/A'}</div>
+                                    </div>
+                                </div>
+                            </div>
+                            ` : ''}
+                        </div>
+                    `,
+                    showCancelButton: true,
+                    confirmButtonText: '<i class="fas fa-print mr-2"></i>Print Receipt',
+                    cancelButtonText: 'Close',
+                    confirmButtonColor: '#059669',
+                    cancelButtonColor: '#6b7280',
+                    width: '500px',
+                    customClass: {
+                        popup: 'swal-popup-enhanced',
+                        confirmButton: 'swal-btn-confirm',
+                        cancelButton: 'swal-btn-cancel'
+                    }
+                }).then((result) => {
+                    if (result.isConfirmed && saleData.transaction_id) {
+                        // Open print receipt in new window
+                        window.open('print_sale_receipt.php?id=' + saleData.transaction_id, '_blank');
+                    }
+                    return Promise.resolve();
+                });
+            }
+
             // Update payment summary
             function updatePaymentSummary() {
                 // This function is no longer needed since we removed the payment settlement section
@@ -3346,10 +3499,23 @@ if ($total_result && $transactions) {
                 const rate = $('[name="rate"]').val();
                 // Parse formatted value (remove commas) for calculations
                 const amount = ($('#totalAmountInput').val() || '0').replace(/,/g, '');
-                // Parse formatted values (remove commas) for calculations
-                const paymentAmount = parseFloat(($('[name="payment_amount"]').val() || '0').replace(/,/g, ''));
-                const cashReceived = paymentAmount; // Using paid amount field
-                const bankReceived = 0; // Not separately tracking in this form
+                
+                // Get payment amount and method for confirmation dialog
+                const paymentAmount = parseFloat($('#paidAmountInput').val() || 0);
+                const paymentMethod = $('#payModeSelect').val();
+                
+                // Split into cash/bank based on payment method
+                let cashReceived = 0;
+                let bankReceived = 0;
+                
+                if (paymentAmount > 0) {
+                    if (paymentMethod === 'Cash') {
+                        cashReceived = paymentAmount;
+                    } else {
+                        bankReceived = paymentAmount;
+                    }
+                }
+                
                 const paymentType = $('[name="payment_type"]').val();
                 
                 // Check booking type balance (warning only, don't block)
@@ -3457,26 +3623,67 @@ if ($total_result && $transactions) {
                     }
                 }).then((result) => {
                     if (result.isConfirmed) {
-                        // Proceed with form submission using captured form reference
-                        const formData = new FormData(form);
+                        // Capture form reference before entering callbacks
+                        const form = document.getElementById('sellForm');
+                        
+                        // Explicitly read all form values
+                        const sellWeight = parseFloat($('#sellWeight').val() || 0);
+                        const purity = parseFloat($('#purityInput').val() || 0);
+                        const rate = parseFloat($('#rateInput').val() || 0);
+                        const partyId = $('#partyId').val();
+                        const receiptId = $('[name="receipt_id"]').val();
+                        const dateOfTransaction = $('[name="date_of_transaction"]').val();
+                        const narration = $('[name="narration"]').val() || '';
                         
                         // Parse formatted values (remove commas) before sending
                         const amountValue = ($('#totalAmountInput').val() || '0').replace(/,/g, '');
-                        const cashValue = ($('[name="additional_cash"]').val() || '0').replace(/,/g, '');
-                        const bankValue = ($('[name="additional_bank"]').val() || '0').replace(/,/g, '');
+                        
+                        // Get payment amount and method
+                        const paymentAmount = parseFloat($('#paidAmountInput').val() || 0);
+                        const paymentMethod = $('#payModeSelect').val();
+                        
+                        // Set additional_cash or additional_bank based on payment method
+                        let cashValue = '0';
+                        let bankValue = '0';
+                        
+                        if (paymentAmount > 0) {
+                            if (paymentMethod === 'Cash') {
+                                cashValue = paymentAmount.toString();
+                            } else {
+                                // Bank, UPI, Cheque, Bank Transfer all go to additional_bank
+                                bankValue = paymentAmount.toString();
+                            }
+                        }
+                        
+                        // UPDATE FORM FIELDS FIRST (before creating FormData)
+                        $('#additionalCash').val(cashValue).css('background-color', cashValue !== '0' ? '#86efac' : '#fef08a');
+                        $('#additionalBank').val(bankValue).css('background-color', bankValue !== '0' ? '#86efac' : '#fef08a');
+                        
+                        // NOW create FormData from the updated form
+                        const formData = new FormData(form);
+                        
+                        // Override/ensure all critical values are set correctly in FormData
+                        formData.set('action', 'save_sell');
+                        formData.set('receipt_id', receiptId);
+                        formData.set('party_id', partyId);
+                        formData.set('date_of_transaction', dateOfTransaction);
+                        formData.set('sell_weight', sellWeight.toString());
+                        formData.set('purity', purity.toString());
+                        formData.set('rate', rate.toString());
                         formData.set('amount', amountValue);
                         formData.set('additional_cash', cashValue);
                         formData.set('additional_bank', bankValue);
+                        formData.set('payment_method', paymentMethod);
+                        formData.set('narration', narration);
                         
-                        console.log('Sending AJAX request to save_sell.php...');
-                        console.log('Parsed amount value:', amountValue, 'Original:', $('#totalAmountInput').val());
-                        console.log('Parsed cash value:', cashValue, 'Original:', $('[name="additional_cash"]').val());
-                        console.log('Parsed bank value:', bankValue, 'Original:', $('[name="additional_bank"]').val());
+                        console.log('Sending AJAX request to sell_gold.php...');
+                        console.log('Weight:', sellWeight, 'Purity:', purity, 'Rate:', rate);
+                        console.log('Amount:', amountValue);
+                        console.log('Payment amount:', paymentAmount, 'Method:', paymentMethod);
+                        console.log('Cash:', cashValue, 'Bank:', bankValue);
                         
                         // Set submitting flag before AJAX call
                         isSubmitting = true;
-                        
-                        formData.set('action', 'save_sell');
                         
                         $.ajax({
                             url: '',

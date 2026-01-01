@@ -121,30 +121,71 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $difference_weight = $issue_weight - $fine_weight;
                     $rate = floatval($data['rate']);
                     $amount = floatval($data['amount']);
-                    $payment_method = $conn->real_escape_string($data['payment_method']);
-                    $payment_amount = floatval($data['payment_amount']);
+                    $payment_method = $conn->real_escape_string($data['payment_method'] ?? 'Cash');
+                    $payment_amount = floatval($data['payment_amount'] ?? 0);
                     $due_amount = $amount - $payment_amount;
-                    $payment_status = $conn->real_escape_string($data['payment_status']);
-                    $narration = $conn->real_escape_string($data['narration']);
+                    
+                    // Calculate payment status based on payment amount and total amount
+                    // If payment_amount >= amount: Paid
+                    // If payment_amount > 0 but < amount: Partial
+                    // If payment_amount = 0: Due
+                    if ($amount > 0 && $payment_amount >= $amount) {
+                        $payment_status = 'Paid';
+                    } else if ($payment_amount > 0) {
+                        $payment_status = 'Partial';
+                    } else {
+                        $payment_status = 'Due';
+                    }
+                    
+                    // Override with user-provided status if explicitly set (for edits)
+                    if (isset($data['payment_status']) && !empty($data['payment_status'])) {
+                        $payment_status = $conn->real_escape_string($data['payment_status']);
+                    }
+                    
+                    $narration = $conn->real_escape_string($data['narration'] ?? '');
 
                     $transaction_id = isset($data['transaction_id']) && !empty($data['transaction_id']) ? intval($data['transaction_id']) : null;
 
                     // Get current stock for 100% pure gold (fine gold)
-                    $stock_query = "SELECT id, current_stock, stock_name FROM gold_stock WHERE company_id = $company_id AND purity = 100.00 ORDER BY id ASC LIMIT 1 FOR UPDATE";
+                    // Try multiple stock name variations and purity formats
+                    $stock_query = "SELECT id, current_stock, stock_name FROM gold_stock 
+                                    WHERE company_id = $company_id 
+                                    AND (purity = 100.00 OR purity = 100.0 OR purity = 100)
+                                    ORDER BY 
+                                        CASE 
+                                            WHEN stock_name LIKE '%Fine%' OR stock_name LIKE '%fine%' THEN 1
+                                            ELSE 2
+                                        END,
+                                        id ASC 
+                                    LIMIT 1 FOR UPDATE";
                     $stock_result = $conn->query($stock_query);
 
                     if ($stock_result->num_rows === 0) {
-                        throw new Exception("Stock record not found for 100% pure gold. Please add a gold stock entry with 100% purity.");
+                        // Try without purity restriction as fallback
+                        $stock_query_fallback = "SELECT id, current_stock, stock_name FROM gold_stock 
+                                                  WHERE company_id = $company_id 
+                                                  ORDER BY id ASC LIMIT 1 FOR UPDATE";
+                        $stock_result_fallback = $conn->query($stock_query_fallback);
+                        
+                        if ($stock_result_fallback->num_rows === 0) {
+                            throw new Exception("Stock record not found. Please add a gold stock entry first.");
+                        }
+                        
+                        $stock_data = $stock_result_fallback->fetch_assoc();
+                    } else {
+                        $stock_data = $stock_result->fetch_assoc();
                     }
 
-                    $stock_data = $stock_result->fetch_assoc();
                     $stock_id = $stock_data['id'];
                     $current_current_stock = $stock_data['current_stock'];
 
                     // If this is an edit, get the original transaction details
                     $original_fine_weight = 0;
+                    $original_due_amount = 0;
+                    $original_difference_weight = 0;
+                    $original_payment_amount = 0;
                     if ($transaction_id) {
-                        $original_sql = "SELECT fine_weight, party_id, received_weight FROM transactions WHERE id = ? FOR UPDATE";
+                        $original_sql = "SELECT fine_weight, party_id, received_weight, due_amount, difference_weight, payment_amount FROM transactions WHERE id = ? FOR UPDATE";
                         $original_stmt = $conn->prepare($original_sql);
                         $original_stmt->bind_param("i", $transaction_id);
                         $original_stmt->execute();
@@ -156,6 +197,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         }
                         
                         $original_fine_weight = $original_transaction['fine_weight'];
+                        $original_due_amount = floatval($original_transaction['due_amount'] ?? 0);
+                        $original_difference_weight = floatval($original_transaction['difference_weight'] ?? 0);
+                        $original_payment_amount = floatval($original_transaction['payment_amount'] ?? 0);
                         $party_id = $original_transaction['party_id'];
                     } else {
                         // Get party ID for new transaction
@@ -387,6 +431,58 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             updateAccountBalance($conn, $company_id, 'Bank', $balance_amt);
                         }
                     }
+
+                    // Update Party Balance
+                    // Logic:
+                    // 1. If editing: Revert old balance changes first
+                    // 2. Apply new balance changes
+                    // 3. due_amount = amount - payment_amount (what party still owes)
+                    //    - If positive: party owes money → add to current_balance
+                    //    - If negative: party has credit → subtract from current_balance
+                    // 4. difference_weight = issue_weight - fine_weight (gold difference)
+                    //    - If positive: party received more gold than they gave → owes gold → add to current_gold_balance
+                    //    - If negative: party gave more gold than they received → has gold credit → subtract from current_gold_balance
+                    
+                    if ($transaction_id) {
+                        // Revert old balance changes
+                        // Reverse the old due_amount and difference_weight
+                        $revert_balance_change = -$original_due_amount;
+                        $revert_gold_change = -$original_difference_weight;
+                        
+                        $revert_sql = "UPDATE parties SET 
+                            current_balance = current_balance + ?,
+                            current_gold_balance = current_gold_balance + ?
+                            WHERE id = ?";
+                        $revert_stmt = $conn->prepare($revert_sql);
+                        $revert_stmt->bind_param("ddi", $revert_balance_change, $revert_gold_change, $party_id);
+                        $revert_stmt->execute();
+                        $revert_stmt->close();
+                    }
+                    
+                    // Apply new balance changes
+                    // due_amount = amount - payment_amount
+                    // - If due_amount > 0: party owes money (add to balance)
+                    // - If due_amount < 0: party has credit (subtract from balance, which means add negative)
+                    // - If due_amount = 0: no change
+                    $balance_change = $due_amount;
+                    
+                    // difference_weight = issue_weight - fine_weight
+                    // - If difference_weight > 0: party received more gold (owes gold, add to gold balance)
+                    // - If difference_weight < 0: party gave more gold (has gold credit, subtract from gold balance)
+                    // - If difference_weight = 0: no change
+                    $gold_change = $difference_weight;
+                    
+                    $update_party_sql = "UPDATE parties SET 
+                        current_balance = current_balance + ?,
+                        current_gold_balance = current_gold_balance + ?
+                        WHERE id = ?";
+                    $update_party_stmt = $conn->prepare($update_party_sql);
+                    $update_party_stmt->bind_param("ddi", $balance_change, $gold_change, $party_id);
+                    
+                    if (!$update_party_stmt->execute()) {
+                        throw new Exception("Failed to update party balance: " . $update_party_stmt->error);
+                    }
+                    $update_party_stmt->close();
 
                     // Stock logging removed - gold_stock_log table doesn't exist
                     // Stock changes are tracked in the gold_stock table itself
@@ -637,17 +733,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// Get date range from user input (default: all transactions)
-$start_date = isset($_GET['start_date']) ? $_GET['start_date'] : '2020-01-01';
-$end_date = isset($_GET['end_date']) ? $_GET['end_date'] : date('Y-m-d');
+// Get date range from user input (default: current month)
+$start_date = isset($_GET['start_date']) && !empty($_GET['start_date']) ? $_GET['start_date'] : date('Y-m-01'); // First day of current month
+$end_date = isset($_GET['end_date']) && !empty($_GET['end_date']) ? $_GET['end_date'] : date('Y-m-d'); // Today
 
-// Enhanced statistics SQL query with date range filter - with safe fallbacks
+// Enhanced statistics SQL query with date range filter - Exchange specific
 $stats_sql = "
 SELECT 
     COALESCE(SUM(received_weight), 0) AS total_weight,
-    COALESCE(SUM(CASE WHEN transaction_type = 'Exchange' THEN received_weight ELSE 0 END), 0) AS total_received_weight,
-    COALESCE(SUM(CASE WHEN transaction_type = 'Exchange' THEN delivered_weight ELSE 0 END), 0) AS total_issue_gold,
-    COALESCE(SUM(CASE WHEN transaction_type = 'Exchange' THEN fine_weight ELSE 0 END), 0) AS total_fine_gold,
+    COALESCE(SUM(received_weight), 0) AS total_received_weight,
+    COALESCE(SUM(delivered_weight), 0) AS total_issue_gold,
+    COALESCE(SUM(fine_weight), 0) AS total_fine_gold,
     COALESCE(SUM(amount), 0) AS total_amount,
     COUNT(DISTINCT party_id) AS total_parties,
     COUNT(*) AS total_transactions,
@@ -655,13 +751,13 @@ SELECT
     COALESCE(SUM(CASE WHEN payment_type = 'Payment_Out' THEN payment_amount ELSE 0 END), 0) AS total_payment_amount,
     COALESCE(SUM(CASE WHEN payment_status IN ('Due', 'Partial') THEN due_amount ELSE 0 END), 0) AS total_due
 FROM transactions
-WHERE company_id = $company_id AND DATE(date_of_transaction) BETWEEN ? AND ? AND transaction_type = 'Exchange'";
+WHERE company_id = ? AND DATE(date_of_transaction) BETWEEN ? AND ? AND transaction_type = 'Exchange'";
 
 $stats_stmt = $conn->prepare($stats_sql);
 if (!$stats_stmt) {
     die("SQL Error in stats query: " . $conn->error . "<br><br>Query: " . $stats_sql);
 }
-$stats_stmt->bind_param("ss", $start_date, $end_date);
+$stats_stmt->bind_param("iss", $company_id, $start_date, $end_date);
 $stats_stmt->execute();
 $stats_result = $stats_stmt->get_result();
 $stats = $stats_result->fetch_assoc();
@@ -712,7 +808,7 @@ $search = isset($_GET['search']) ? "%" . $conn->real_escape_string($_GET['search
 $transactions_sql = "SELECT t.*, p.party_name 
     FROM transactions t 
     LEFT JOIN parties p ON t.party_id = p.id 
-    WHERE t.company_id = $company_id AND DATE(t.date_of_transaction) BETWEEN ? AND ? AND t.transaction_type = 'Exchange'";
+    WHERE t.company_id = ? AND DATE(t.date_of_transaction) BETWEEN ? AND ? AND t.transaction_type = 'Exchange'";
 if ($search) {
     $transactions_sql .= " AND (p.party_name LIKE ? OR t.receipt_id LIKE ?)";
 }
@@ -723,9 +819,9 @@ if (!$transactions_stmt) {
     die("SQL Error in transactions query: " . $conn->error . "<br><br>Query: " . $transactions_sql);
 }
 if ($search) {
-    $transactions_stmt->bind_param("ssssii", $start_date, $end_date, $search, $search, $offset, $limit);
+    $transactions_stmt->bind_param("isssii", $company_id, $start_date, $end_date, $search, $search, $offset, $limit);
 } else {
-    $transactions_stmt->bind_param("ssii", $start_date, $end_date, $offset, $limit);
+    $transactions_stmt->bind_param("issii", $company_id, $start_date, $end_date, $offset, $limit);
 }
 $transactions_stmt->execute();
 $transactions_result = $transactions_stmt->get_result();
@@ -734,7 +830,7 @@ $transactions = $transactions_result->fetch_all(MYSQLI_ASSOC);
 // Count total transactions for pagination
 $total_sql = "SELECT COUNT(*) as count FROM transactions t 
     LEFT JOIN parties p ON t.party_id = p.id 
-    WHERE t.company_id = $company_id AND DATE(t.date_of_transaction) BETWEEN ? AND ? AND t.transaction_type = 'Exchange'";
+    WHERE t.company_id = ? AND DATE(t.date_of_transaction) BETWEEN ? AND ? AND t.transaction_type = 'Exchange'";
 if ($search) {
     $total_sql .= " AND (p.party_name LIKE ? OR t.receipt_id LIKE ?)";
 }
@@ -743,9 +839,9 @@ if (!$total_stmt) {
     die("SQL Error in total count query: " . $conn->error . "<br><br>Query: " . $total_sql);
 }
 if ($search) {
-    $total_stmt->bind_param("ssss", $start_date, $end_date, $search, $search);
+    $total_stmt->bind_param("isss", $company_id, $start_date, $end_date, $search, $search);
 } else {
-    $total_stmt->bind_param("ss", $start_date, $end_date);
+    $total_stmt->bind_param("iss", $company_id, $start_date, $end_date);
 }
 $total_stmt->execute();
 $total_result = $total_stmt->get_result();
@@ -946,6 +1042,38 @@ $total_pages = ceil($total_transactions / $limit);
                                 <input type="hidden" name="party_id" id="partyId">
                             </div>
                             <div id="partyList" class="hidden absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto"></div>
+                            <!-- Outstanding Balance Display -->
+                            <div id="partyDueInfo" class="hidden mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded-md w-full">
+                                <div class="flex items-center justify-between text-xs gap-4 flex-wrap">
+                                    <div class="flex items-center gap-2 flex-1 min-w-0">
+                                        <span class="font-semibold text-yellow-800 whitespace-nowrap">
+                                            <i class="fas fa-exclamation-triangle mr-1"></i>Outstanding:
+                                        </span>
+                                        <span class="font-bold text-red-600 whitespace-nowrap" id="dueAmountValue">₹0.00</span>
+                                        <span class="text-yellow-700 whitespace-nowrap" id="dueGoldValue">0.000g</span>
+                                    </div>
+                                    <div class="flex items-center gap-2 flex-shrink-0">
+                                        <span class="font-semibold text-gray-700 whitespace-nowrap">Status:</span>
+                                        <div id="paymentStatusBadge" class="flex-shrink-0">
+                                            <span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-semibold whitespace-nowrap">
+                                                <i class="fas fa-exclamation-circle mr-1"></i>Due
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- Payment Status Display (when no outstanding balance) -->
+                            <div id="paymentStatusInfo" class="hidden mt-2 text-xs">
+                                <div class="flex items-center gap-2 text-gray-700">
+                                    <span class="font-semibold">Payment Status:</span>
+                                    <div id="paymentStatusBadgeStandalone">
+                                        <span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-semibold">
+                                            <i class="fas fa-exclamation-circle mr-1"></i>Due
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
 
@@ -1099,11 +1227,36 @@ $total_pages = ceil($total_transactions / $limit);
 
             <!-- Right Side - Transactions List -->
             <div class="bg-white rounded-lg shadow-md border border-gray-200" style="flex: 0 0 45%;">
-                <div class="bg-gradient-to-r from-yellow-500 to-yellow-600 px-4 py-3 rounded-t-lg">
-                    <h2 class="text-base font-semibold text-white flex items-center">
-                        <i class="fas fa-list mr-2"></i>
-                        Recent Transactions
-                    </h2>
+                <div class="bg-gradient-to-r from-yellow-500 to-yellow-600 px-3 py-2 rounded-t-lg">
+                    <div class="flex items-center justify-between gap-2">
+                        <h2 class="text-sm font-semibold text-white flex items-center">
+                            <i class="fas fa-list mr-2"></i>
+                            Recent Transactions
+                        </h2>
+                        <!-- Compact Date Range Filter -->
+                        <form method="GET" action="" id="dateRangeForm" class="flex items-center gap-1.5">
+                            <input type="date" 
+                                   name="start_date" 
+                                   id="startDate" 
+                                   value="<?= htmlspecialchars($start_date) ?>"
+                                   class="px-1.5 py-0.5 border border-yellow-300 rounded text-xs w-28 focus:ring-1 focus:ring-yellow-400 focus:border-yellow-400 bg-white"
+                                   max="<?= date('Y-m-d') ?>"
+                                   title="From Date">
+                            <span class="text-white text-xs">to</span>
+                            <input type="date" 
+                                   name="end_date" 
+                                   id="endDate" 
+                                   value="<?= htmlspecialchars($end_date) ?>"
+                                   class="px-1.5 py-0.5 border border-yellow-300 rounded text-xs w-28 focus:ring-1 focus:ring-yellow-400 focus:border-yellow-400 bg-white"
+                                   max="<?= date('Y-m-d') ?>"
+                                   title="To Date">
+                            <button type="submit" 
+                                    class="px-2 py-0.5 bg-white text-yellow-600 text-xs font-semibold rounded hover:bg-yellow-50 transition shadow-sm"
+                                    title="Apply Date Filter">
+                                <i class="fas fa-filter"></i>
+                            </button>
+                        </form>
+                    </div>
                 </div>
                 <div class="p-4">
                     <div class="overflow-x-auto">
@@ -1236,6 +1389,32 @@ $total_pages = ceil($total_transactions / $limit);
     <script>
         // Pass company name to JavaScript
         const companyName = '<?php echo $_SESSION['company_name'] ?? 'Gold Trading Company'; ?>';
+        
+        // Date Range Filter Functions
+        $(document).ready(function() {
+            // Validate date range (end date should be >= start date)
+            $('#startDate, #endDate').on('change', function() {
+                const startDate = new Date($('#startDate').val());
+                const endDate = new Date($('#endDate').val());
+                
+                if (startDate > endDate) {
+                    Swal.fire({
+                        icon: 'warning',
+                        title: 'Invalid Date Range',
+                        text: 'End date must be greater than or equal to start date',
+                        confirmButtonColor: '#3085d6',
+                        timer: 2000,
+                        showConfirmButton: false
+                    });
+                    // Auto-correct: set end date to start date if invalid
+                    if ($(this).attr('id') === 'startDate') {
+                        $('#endDate').val($('#startDate').val());
+                    } else {
+                        $('#startDate').val($('#endDate').val());
+                    }
+                }
+            });
+        });
     </script>
     <script src="js/gold_exchange.js"></script>
     <script src="js/gold_exchange_additions.js"></script>

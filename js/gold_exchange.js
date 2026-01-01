@@ -19,6 +19,9 @@ $(document).ready(function () {
         $('#partyNameInput').focus();
     }, 100);
 
+    // Initialize payment status display
+    updatePaymentStatus();
+
     // Auto-calculate fine weight when received weight or purity changes
     $('#receivedWeight, #purity').on('input', function () {
         calculateFineWeight();
@@ -246,13 +249,47 @@ function updatePaymentStatus() {
     const paymentAmount = parseFloat($('#paymentAmount').val()) || 0;
 
     let status = 'Due';
-    if (paymentAmount >= amount) {
+    let statusClass = 'bg-red-100 text-red-700';
+    let statusIcon = 'fa-exclamation-circle';
+    
+    if (amount > 0 && paymentAmount >= amount) {
         status = 'Paid';
+        statusClass = 'bg-green-100 text-green-700';
+        statusIcon = 'fa-check-circle';
     } else if (paymentAmount > 0) {
         status = 'Partial';
+        statusClass = 'bg-yellow-100 text-yellow-700';
+        statusIcon = 'fa-clock';
+    } else {
+        status = 'Due';
+        statusClass = 'bg-red-100 text-red-700';
+        statusIcon = 'fa-exclamation-circle';
     }
 
-    $('select[name="payment_status"]').val(status);
+    // Update the hidden payment_status field
+    $('input[name="payment_status"]').val(status);
+    
+    // Update the payment status badge in outstanding balance section (if visible)
+    const badgeHtml = `<span class="px-2 py-0.5 rounded-full ${statusClass} text-xs font-semibold">
+        <i class="fas ${statusIcon} mr-1"></i>${status}
+    </span>`;
+    $('#paymentStatusBadge').html(badgeHtml);
+    
+    // Update the standalone payment status badge (if outstanding balance is not shown)
+    $('#paymentStatusBadgeStandalone').html(badgeHtml);
+    
+    // Show/hide payment status sections based on outstanding balance visibility
+    const hasOutstanding = !$('#partyDueInfo').hasClass('hidden');
+    if (hasOutstanding) {
+        $('#paymentStatusInfo').addClass('hidden');
+    } else {
+        // Show standalone payment status if there's an amount to track
+        if (amount > 0) {
+            $('#paymentStatusInfo').removeClass('hidden');
+        } else {
+            $('#paymentStatusInfo').addClass('hidden');
+        }
+    }
 }
 
 // Search parties
@@ -363,6 +400,22 @@ function selectParty(party) {
 
 // Load party dues
 function loadPartyDues(partyName) {
+    console.log('loadPartyDues called for:', partyName);
+    
+    // Check if element exists
+    if ($('#partyDueInfo').length === 0) {
+        console.error('partyDueInfo element not found in DOM');
+        return;
+    }
+    
+    if (!partyName || partyName.trim() === '') {
+        console.log('Party name is empty, skipping');
+        $('#partyDueInfo').addClass('hidden');
+        // Update payment status visibility after hiding outstanding balance
+        updatePaymentStatus();
+        return;
+    }
+    
     $.ajax({
         url: '',
         method: 'POST',
@@ -372,16 +425,25 @@ function loadPartyDues(partyName) {
         },
         dataType: 'json',
         success: function (data) {
-            if (data.due_amount > 0 || data.due_gold > 0) {
-                $('#dueAmountValue').text('₹' + data.due_amount.toFixed(2));
-                $('#dueGoldValue').text(data.due_gold.toFixed(3) + 'g');
-                $('#partyDueInfo').removeClass('hidden');
+            console.log('Party dues response:', data);
+            if (data && (parseFloat(data.due_amount) > 0 || parseFloat(data.due_gold) > 0)) {
+                $('#dueAmountValue').text('₹' + parseFloat(data.due_amount).toFixed(2));
+                $('#dueGoldValue').text(parseFloat(data.due_gold).toFixed(3) + 'g');
+                $('#partyDueInfo').removeClass('hidden').css('display', 'block');
+                $('#paymentStatusInfo').addClass('hidden'); // Hide standalone when outstanding is shown
+                console.log('Outstanding balance displayed - Amount:', data.due_amount, 'Gold:', data.due_gold);
             } else {
                 $('#partyDueInfo').addClass('hidden');
+                console.log('No outstanding balance - Amount:', data.due_amount, 'Gold:', data.due_gold);
             }
+            // Update payment status visibility after loading dues
+            updatePaymentStatus();
         },
-        error: function () {
-            console.error('Error loading party dues');
+        error: function (xhr, status, error) {
+            console.error('Error loading party dues:', error, xhr.responseText);
+            $('#partyDueInfo').addClass('hidden');
+            // Update payment status visibility after error
+            updatePaymentStatus();
         }
     });
 }
@@ -536,6 +598,9 @@ function createNewPartyQuick(partyName) {
 
 // Save transaction
 function saveTransaction() {
+    // Ensure payment status is updated before submission
+    updatePaymentStatus();
+    
     const formData = $('#exchangeForm').serialize();
 
     $.ajax({
@@ -608,8 +673,11 @@ function loadTransaction(id) {
             $('#amount').val(transaction.amount);
             $('#paymentAmount').val(transaction.payment_amount);
             $('select[name="payment_method"]').val(transaction.payment_method);
-            $('select[name="payment_status"]').val(transaction.payment_status);
+            $('input[name="payment_status"]').val(transaction.payment_status);
             $('input[name="narration"]').val(transaction.narration);
+            
+            // Recalculate payment status to ensure it's correct
+            updatePaymentStatus();
 
             // Show delete button and change submit text
             $('#deleteBtn').removeClass('hidden');
@@ -702,6 +770,7 @@ function resetForm() {
     $('input[name="date_of_transaction"]').val(dateTimeString);
 
     $('#partyDueInfo').addClass('hidden');
+    $('#paymentStatusInfo').addClass('hidden');
     $('#amountType').text('');
     $('#partyNameInput').removeClass('border-green-500');
     selectedPartyName = '';
@@ -715,4 +784,7 @@ function resetForm() {
 
     // Reset difference field color
     $('#differenceWeight').removeClass('text-red-600 text-green-600 font-bold');
+    
+    // Reset payment status display
+    updatePaymentStatus();
 }
