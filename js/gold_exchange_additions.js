@@ -84,8 +84,8 @@ $(document).ready(function () {
     $(document).on('click', '.print-receipt', function () {
         const transactionId = $(this).data('id');
         if (transactionId) {
-            // Open thermal receipt in new window
-            window.open('print_exchange_receipt.php?id=' + transactionId, '_blank');
+            // Open thermal receipt in same tab for direct printing
+            window.open('print_exchange_receipt.php?id=' + transactionId, '_self');
         }
     });
 });
@@ -203,7 +203,7 @@ function populateFormForEdit(data) {
     $('select[name="payment_method"]').val(data.payment_method || 'Cash');
     $('input[name="payment_status"]').val(data.payment_status || 'Due');
     $('input[name="narration"]').val(data.narration || '');
-    
+
     // Format date for datetime-local input
     if (data.date_of_transaction) {
         const dateStr = data.date_of_transaction.replace(' ', 'T').substring(0, 16);
@@ -219,12 +219,12 @@ function populateFormForEdit(data) {
     calculateFineWeight();
     calculateDifference();
     calculateAmount();
-    
+
     // Update payment status after calculations
     if (typeof updatePaymentStatus === 'function') {
         updatePaymentStatus();
     }
-    
+
     // Load party dues if party name exists
     if (data.party_name && typeof loadPartyDues === 'function') {
         loadPartyDues(data.party_name);

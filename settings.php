@@ -230,6 +230,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 echo json_encode(['status' => 'success', 'message' => 'Database restored successfully']);
                 exit;
                 
+            case 'upload_restore_backup':
+                if (!isset($_FILES['backup_file']) || $_FILES['backup_file']['error'] !== UPLOAD_ERR_OK) {
+                    echo json_encode(['status' => 'error', 'message' => 'No file uploaded or upload error']);
+                    exit;
+                }
+                
+                $file = $_FILES['backup_file'];
+                $file_ext = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+                
+                // Validate file extension
+                if ($file_ext !== 'sql') {
+                    echo json_encode(['status' => 'error', 'message' => 'Only .sql files are allowed']);
+                    exit;
+                }
+                
+                // Read file content
+                $sql_content = file_get_contents($file['tmp_name']);
+                
+                if (empty($sql_content)) {
+                    echo json_encode(['status' => 'error', 'message' => 'Backup file is empty']);
+                    exit;
+                }
+                
+                // Execute SQL statements
+                $conn->multi_query($sql_content);
+                
+                // Wait for all queries to finish
+                do {
+                    if ($result = $conn->store_result()) {
+                        $result->free();
+                    }
+                } while ($conn->more_results() && $conn->next_result());
+                
+                // Optionally save the uploaded file to backups folder
+                $backup_dir = __DIR__ . '/backups';
+                if (!file_exists($backup_dir)) {
+                    mkdir($backup_dir, 0777, true);
+                }
+                $backup_filename = 'uploaded_' . date('Y-m-d_H-i-s') . '.sql';
+                move_uploaded_file($file['tmp_name'], $backup_dir . '/' . $backup_filename);
+                
+                echo json_encode(['status' => 'success', 'message' => 'Backup uploaded and restored successfully']);
+                exit;
+                
             case 'reset_table':
                 $table_name = $conn->real_escape_string($_POST['table_name']);
                 
@@ -398,8 +442,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 <i class="fas fa-upload text-emerald-600 mr-2"></i>Restore Backup
                             </h2>
                             <p class="text-gray-600 mb-4" style="font-family: 'Poppins', sans-serif; font-weight: 400;">Restore database from a previous backup</p>
-                            <div id="backupsList" class="space-y-2">
-                                <p class="text-gray-400 text-sm" style="font-family: 'Poppins', sans-serif;">Loading backups...</p>
+                            
+                            <!-- Upload Backup File -->
+                            <div class="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                                <label class="block text-sm font-medium text-gray-700 mb-2" style="font-family: 'Poppins', sans-serif;">
+                                    <i class="fas fa-file-upload mr-1"></i>Upload Backup File (.sql)
+                                </label>
+                                <input type="file" id="backupFileInput" accept=".sql" class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-600 file:text-white hover:file:bg-blue-700 cursor-pointer" style="font-family: 'Poppins', sans-serif;">
+                                <button onclick="uploadAndRestoreBackup()" class="mt-3 w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg transition shadow-sm" style="font-family: 'Poppins', sans-serif;">
+                                    <i class="fas fa-cloud-upload-alt mr-2"></i>Upload & Restore
+                                </button>
+                            </div>
+                            
+                            <!-- Existing Backups List -->
+                            <div class="border-t pt-4">
+                                <p class="text-sm font-medium text-gray-700 mb-2" style="font-family: 'Poppins', sans-serif;">
+                                    <i class="fas fa-history mr-1"></i>Existing Backups
+                                </p>
+                                <div id="backupsList" class="space-y-2">
+                                    <p class="text-gray-400 text-sm" style="font-family: 'Poppins', sans-serif;">Loading backups...</p>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -564,9 +626,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                         <p class="font-medium text-gray-900" style="font-family: 'Poppins', sans-serif;">${backup.filename}</p>
                                         <p class="text-xs text-gray-500" style="font-family: 'Poppins', sans-serif;">${backup.date} • ${sizeInMB} MB</p>
                                     </div>
-                                    <button onclick="restoreBackup('${backup.filename}')" class="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1 rounded text-sm font-medium shadow-sm" style="font-family: 'Poppins', sans-serif;">
-                                        <i class="fas fa-upload mr-1"></i>Restore
-                                    </button>
+                                    <div class="flex gap-2">
+                                        <a href="backups/${backup.filename}" download class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm font-medium shadow-sm inline-flex items-center" style="font-family: 'Poppins', sans-serif;">
+                                            <i class="fas fa-download mr-1"></i>Download
+                                        </a>
+                                        <button onclick="restoreBackup('${backup.filename}')" class="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1 rounded text-sm font-medium shadow-sm" style="font-family: 'Poppins', sans-serif;">
+                                            <i class="fas fa-upload mr-1"></i>Restore
+                                        </button>
+                                    </div>
                                 </div>
                             `);
                         });
@@ -617,6 +684,105 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             });
                         }
                     }, 'json');
+                }
+            });
+        }
+        
+        // Upload and restore backup
+        function uploadAndRestoreBackup() {
+            const fileInput = document.getElementById('backupFileInput');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                Swal.fire({
+                    icon: 'warning',
+                    title: 'No File Selected',
+                    text: 'Please select a backup file (.sql) to upload',
+                    confirmButtonColor: '#3b82f6'
+                });
+                return;
+            }
+            
+            // Validate file extension
+            if (!file.name.toLowerCase().endsWith('.sql')) {
+                Swal.fire({
+                    icon: 'error',
+                    title: 'Invalid File',
+                    text: 'Please select a valid .sql backup file',
+                    confirmButtonColor: '#ef4444'
+                });
+                return;
+            }
+            
+            Swal.fire({
+                title: 'Upload & Restore?',
+                html: `
+                    <div style="font-family: 'Poppins', sans-serif; text-align: left;">
+                        <p style="margin-bottom: 10px;"><strong>File:</strong> ${file.name}</p>
+                        <p style="margin-bottom: 10px;"><strong>Size:</strong> ${(file.size / 1024).toFixed(2)} KB</p>
+                        <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 12px; margin-top: 12px;">
+                            <p style="color: #dc2626; font-weight: 600;">⚠️ Warning:</p>
+                            <p style="color: #7f1d1d; font-size: 14px; margin-top: 4px;">This will replace all current data with the uploaded backup. This action cannot be undone!</p>
+                        </div>
+                    </div>
+                `,
+                icon: 'warning',
+                showCancelButton: true,
+                confirmButtonColor: '#22c55e',
+                cancelButtonColor: '#6b7280',
+                confirmButtonText: 'Yes, upload & restore!'
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    const formData = new FormData();
+                    formData.append('action', 'upload_restore_backup');
+                    formData.append('backup_file', file);
+                    
+                    Swal.fire({
+                        title: 'Uploading & Restoring...',
+                        text: 'Please wait, this may take a moment',
+                        allowOutsideClick: false,
+                        didOpen: () => {
+                            Swal.showLoading();
+                        }
+                    });
+                    
+                    $.ajax({
+                        url: '',
+                        type: 'POST',
+                        data: formData,
+                        processData: false,
+                        contentType: false,
+                        dataType: 'json',
+                        success: function(response) {
+                            if (response.status === 'success') {
+                                Swal.fire({
+                                    icon: 'success',
+                                    title: 'Success!',
+                                    text: response.message,
+                                    confirmButtonColor: '#3b82f6'
+                                }).then(() => {
+                                    fileInput.value = ''; // Clear file input
+                                    loadBackups(); // Reload backups list
+                                    location.reload(); // Reload page
+                                });
+                            } else {
+                                Swal.fire({
+                                    icon: 'error',
+                                    title: 'Upload Failed',
+                                    text: response.message,
+                                    confirmButtonColor: '#ef4444'
+                                });
+                            }
+                        },
+                        error: function() {
+                            Swal.fire({
+                                icon: 'error',
+                                title: 'Error',
+                                text: 'An error occurred during upload',
+                                confirmButtonColor: '#ef4444'
+                            });
+                        }
+                    });
                 }
             });
         }

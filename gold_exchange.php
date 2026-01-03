@@ -1007,9 +1007,9 @@ $total_pages = ceil($total_transactions / $limit);
                             <i class="fas fa-file-invoice mr-2"></i> Transaction Details
                         </h3>
                     </div>
-                    <div class="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
-                        <!-- Receipt ID -->
-                        <div class="relative">
+                    <div class="p-4 grid grid-cols-12 gap-4">
+                        <!-- Receipt ID (3 columns) -->
+                        <div class="relative col-span-3">
                             <label class="block text-xs font-bold text-gray-700 mb-1">Receipt ID</label>
                             <div class="relative">
                                 <span class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
@@ -1020,8 +1020,8 @@ $total_pages = ceil($total_transactions / $limit);
                             <div id="receiptList" class="hidden absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-xl max-h-60 overflow-y-auto"></div>
                         </div>
 
-                        <!-- Date -->
-                        <div class="relative">
+                        <!-- Date (3 columns) -->
+                        <div class="relative col-span-3">
                             <label class="block text-xs font-bold text-gray-700 mb-1">Date</label>
                             <div class="relative">
                                 <span class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
@@ -1031,9 +1031,17 @@ $total_pages = ceil($total_transactions / $limit);
                             </div>
                         </div>
 
-                        <!-- Party Name -->
-                        <div class="relative">
-                            <label class="block text-xs font-bold text-gray-700 mb-1">Party Name</label>
+                        <!-- Party Name (6 columns) -->
+                        <div class="relative col-span-6">
+                            <label class="block text-xs font-bold text-gray-700 mb-1 flex items-center justify-between">
+                                <span>Party Name</span>
+                                <!-- Outstanding Balance Inline -->
+                                <span id="partyDueInfoInline" class="hidden text-xs font-semibold">
+                                    <span class="text-orange-600">Outstanding:</span>
+                                    <span class="text-red-600 ml-1" id="dueAmountValueInline">₹0.00</span>
+                                    <span class="text-yellow-700 ml-1" id="dueGoldValueInline">0.000g</span>
+                                </span>
+                            </label>
                             <div class="relative">
                                 <span class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
                                     <i class="fas fa-user text-sm"></i>
@@ -1042,38 +1050,6 @@ $total_pages = ceil($total_transactions / $limit);
                                 <input type="hidden" name="party_id" id="partyId">
                             </div>
                             <div id="partyList" class="hidden absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto"></div>
-                            <!-- Outstanding Balance Display -->
-                            <div id="partyDueInfo" class="hidden mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded-md w-full">
-                                <div class="flex items-center justify-between text-xs gap-4 flex-wrap">
-                                    <div class="flex items-center gap-2 flex-1 min-w-0">
-                                        <span class="font-semibold text-yellow-800 whitespace-nowrap">
-                                            <i class="fas fa-exclamation-triangle mr-1"></i>Outstanding:
-                                        </span>
-                                        <span class="font-bold text-red-600 whitespace-nowrap" id="dueAmountValue">₹0.00</span>
-                                        <span class="text-yellow-700 whitespace-nowrap" id="dueGoldValue">0.000g</span>
-                                    </div>
-                                    <div class="flex items-center gap-2 flex-shrink-0">
-                                        <span class="font-semibold text-gray-700 whitespace-nowrap">Status:</span>
-                                        <div id="paymentStatusBadge" class="flex-shrink-0">
-                                            <span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-semibold whitespace-nowrap">
-                                                <i class="fas fa-exclamation-circle mr-1"></i>Due
-                                            </span>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                            <!-- Payment Status Display (when no outstanding balance) -->
-                            <div id="paymentStatusInfo" class="hidden mt-2 text-xs">
-                                <div class="flex items-center gap-2 text-gray-700">
-                                    <span class="font-semibold">Payment Status:</span>
-                                    <div id="paymentStatusBadgeStandalone">
-                                        <span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-semibold">
-                                            <i class="fas fa-exclamation-circle mr-1"></i>Due
-                                        </span>
-                                    </div>
-                                </div>
-                            </div>
                         </div>
                     </div>
 

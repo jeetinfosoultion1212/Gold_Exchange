@@ -1,0 +1,28 @@
+﻿
+# Electron Build Output
+dist/
+dist-*/
+win-unpacked/
+electron-desktop/dist/
+electron-desktop/win-unpacked/
+
+# Node Modules
+node_modules/
+electron-desktop/node_modules/
+
+# Server Binaries (Too large for Git)
+electron-desktop/server/php/
+electron-desktop/server/mariadb/
+electron-desktop/server/mysql/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+Thumbs.db
+Desktop.ini

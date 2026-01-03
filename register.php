@@ -10,6 +10,9 @@ if (isset($_SESSION['user_id'])) {
 // Load database configuration
 require_once __DIR__ . '/config/database.php';
 
+// Load license helper (creates license in Hostinger DB)
+require_once __DIR__ . '/helpers/license_helper.php';
+
 $error = '';
 $success = '';
 
@@ -96,6 +99,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             }
                             
                             $conn->commit();
+                            
+                            // Create license in Hostinger database
+                            $license_key = createLicenseOnHostinger(
+                                $company_id, 
+                                $company_name, 
+                                $company_email, 
+                                $company_contact
+                            );
+                            
+                            if ($license_key) {
+                                error_log("License created for company $company_name: $license_key");
+                            } else {
+                                error_log("Warning: License creation failed for company $company_name");
+                            }
+                            
                             header('Location: login.php?success=1');
                             exit;
                         } catch (Exception $e) {
@@ -143,6 +161,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         }
                         
                         $conn->commit();
+                        
+                        // Create license in Hostinger database
+                        $license_key = createLicenseOnHostinger(
+                            $company_id, 
+                            $company_name, 
+                            $company_email, 
+                            $company_contact
+                        );
+                        
+                        if ($license_key) {
+                            error_log("License created for company $company_name: $license_key");
+                        } else {
+                            error_log("Warning: License creation failed for company $company_name");
+                        }
+                        
                         header('Location: login.php?success=1');
                         exit;
                     } catch (Exception $e) {

@@ -156,6 +156,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $remaining_amount = $row['booked_amount'] - $row['advance_received'];
                     $avg_rate = ($row['booked_weight'] > 0) ? ($row['booked_amount'] / $row['booked_weight']) : 0;
                     
+                    // Get party's current balance from parties table
+                    $party_balance_sql = "SELECT current_balance, current_gold_balance FROM parties WHERE id = ? AND company_id = ?";
+                    $party_balance_stmt = $conn->prepare($party_balance_sql);
+                    $party_balance_stmt->bind_param("ii", $party_id, $company_id);
+                    $party_balance_stmt->execute();
+                    $party_balance_result = $party_balance_stmt->get_result();
+                    $party_balance = $party_balance_result->fetch_assoc();
                     
                     // Ensure all values are numeric, not null
                     $cash_received = floatval($row['cash_received'] ?? 0);
@@ -177,6 +184,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'avg_rate' => floatval($avg_rate),
                         'cash_received' => floatval($cash_received),
                         'bank_received' => floatval($bank_received),
+                        'current_balance' => floatval($party_balance['current_balance'] ?? 0),
+                        'current_gold_balance' => floatval($party_balance['current_gold_balance'] ?? 0),
                         'detailed_bookings' => $detailed_bookings,
                         'debug_payments' => $debug_payments
                     ]);
@@ -196,7 +205,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'remaining_amount' => 0,
                         'avg_rate' => '0.00',
                         'cash_received' => '0.00',
-                        'bank_received' => '0.00'
+                        'bank_received' => '0.00',
+                        'current_balance' => 0,
+                        'current_gold_balance' => 0
                     ]);
                 }
                 exit;
@@ -313,7 +324,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         ?, ?, ?
                     )";
                     $stmt = $conn->prepare($sql);
-                    $stmt->bind_param("iissdddddssddss", 
+                    $stmt->bind_param("iissdddddssdds", 
                         $company_id, $party_id, $receipt_id, $date_of_transaction,
                         $gold_weight, $purity, $rate, $gold_amount, $payment_amount, $sale_payment_method, $payment_status,
                         $current_balance_before, $current_balance_after, $narration
@@ -355,8 +366,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     } else {
                         // Stock not found, maybe create negative? Or insert new.
                         $new_stock = -$gold_weight;
-                         $ins_stock = $conn->prepare("INSERT INTO gold_stock (company_id, purity, current_stock, last_updated) VALUES (?, ?, ?, NOW())");
-                         $ins_stock->bind_param("idd", $company_id, $purity, $new_stock);
+                        $stock_name_new = ($purity >= 99.5) ? 'Fine Gold' : 'Mix Stock';
+                         $ins_stock = $conn->prepare("INSERT INTO gold_stock (company_id, stock_name, purity, current_stock, last_updated) VALUES (?, ?, ?, ?, NOW())");
+                         $ins_stock->bind_param("isdd", $company_id, $stock_name_new, $purity, $new_stock);
                          $ins_stock->execute();
                     }
                     
@@ -1659,7 +1671,15 @@ if ($total_result && $transactions) {
 
                         <!-- Party Name -->
                         <div class="relative">
-                            <label class="block text-xs font-bold text-gray-700 mb-1">Party Name</label>
+                            <label class="block text-xs font-bold text-gray-700 mb-1 flex items-center justify-between">
+                                <span>Party Name</span>
+                                <!-- Outstanding Balance Inline -->
+                                <span id="outstandingBalanceInline" class="hidden text-xs font-semibold">
+                                    <span class="text-orange-600">Outstanding:</span>
+                                    <span class="text-red-600 ml-1" id="outstandingAmountInline">₹0.00</span>
+                                    <span class="text-yellow-700 ml-1" id="outstandingGoldInline">0.000g</span>
+                                </span>
+                            </label>
                             <div class="relative">
                                 <span class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
                                     <i class="fas fa-user text-sm"></i>
@@ -1669,6 +1689,7 @@ if ($total_result && $transactions) {
                             <div id="partyList" class="hidden absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto"></div>
                         </div>
                     </div>
+
 
 
 
@@ -1788,7 +1809,7 @@ if ($total_result && $transactions) {
                     </div>
 
                     <!-- Debug: Make hidden fields visible -->
-                    <div class="bg-red-50 p-3 border-t border-red-200">
+                    <div class="hidden bg-red-50 p-3 border-t border-red-200">
                         <h4 class="text-xs font-bold text-red-700 mb-2">DEBUG: Hidden Field Values</h4>
                         <div class="grid grid-cols-3 gap-2">
                             <div>
@@ -2376,6 +2397,8 @@ if ($total_result && $transactions) {
                     selectedPartyName = '';
                     $('#partyId').val('');
                     updatePartySelectionStatus(false);
+                    // Hide outstanding balance
+                    $('#outstandingBalanceInline').addClass('hidden');
                 }
             });
             
@@ -2665,6 +2688,19 @@ if ($total_result && $transactions) {
                         }
                     });
                     
+                    
+                    // Display outstanding balance inline
+                    const dueAmount = parseFloat(response.current_balance) || 0;
+                    const dueGold = parseFloat(response.current_gold_balance) || 0;
+                    
+                    if (dueAmount > 0 || dueGold > 0) {
+                        $('#outstandingAmountInline').text('₹' + dueAmount.toFixed(2));
+                        $('#outstandingGoldInline').text(dueGold.toFixed(3) + 'g');
+                        $('#outstandingBalanceInline').removeClass('hidden');
+                    } else {
+                        $('#outstandingBalanceInline').addClass('hidden');
+                    }
+                    
                     updatePaymentSummary();
                 }, 'json');
             }
@@ -2700,7 +2736,18 @@ if ($total_result && $transactions) {
                     e.preventDefault();
                     const selectedItem = partyItems[currentIndex];
                     if (selectedItem) {
-                        selectedItem.click();
+                        // Check if this is the "Create New Party" item
+                        const isCreateNew = selectedItem.classList.contains('bg-green-50') && 
+                                          selectedItem.querySelector('.fa-plus-circle');
+                        
+                        if (isCreateNew) {
+                            // Directly call createNewPartyQuick with the current search term
+                            const term = $('#partyNameInput').val().trim();
+                            createNewPartyQuick(term);
+                        } else {
+                            // Regular party selection
+                            selectedItem.click();
+                        }
                     }
                 } else if (e.key === 'Escape') {
                     $('#partyList').addClass('hidden');

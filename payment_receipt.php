@@ -481,6 +481,57 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ]);
                 }
                 exit;
+
+            case 'delete_payment':
+                $conn->begin_transaction();
+                try {
+                    $transaction_id = intval($_POST['transaction_id'] ?? 0);
+                    
+                    if ($transaction_id <= 0) {
+                        throw new Exception("Invalid transaction ID");
+                    }
+                    
+                    // Get transaction details
+                    $sql = "SELECT * FROM transactions WHERE id = $transaction_id AND company_id = $company_id";
+                    $result = $conn->query($sql);
+                    $transaction = $result->fetch_assoc();
+                    
+                    if (!$transaction) {
+                        throw new Exception("Transaction not found");
+                    }
+                    
+                    $party_id = $transaction['party_id'];
+                    $amount = floatval($transaction['payment_amount']);
+                    $method = $transaction['payment_method'];
+                    
+                    // Reverse payment effect: Payment Received (Payment_In) REDUCED the balance (party owes us less).
+                    // To delete it, we must ADD the amount back to the balance (party owes us more).
+                    
+                    // Update specific balance (Cash/Bank)
+                    if ($method == 'Cash') {
+                        $update_sql = "UPDATE parties SET cash_balance = cash_balance + $amount WHERE id = $party_id";
+                    } else {
+                        $update_sql = "UPDATE parties SET bank_balance = bank_balance + $amount WHERE id = $party_id";
+                    }
+                    
+                    if (!$conn->query($update_sql)) {
+                        throw new Exception("Error updating party balance");
+                    }
+                    
+                    // Update total current balance
+                    $conn->query("UPDATE parties SET current_balance = cash_balance + bank_balance WHERE id = $party_id");
+                    
+                    // Delete transaction
+                    $conn->query("DELETE FROM transactions WHERE id = $transaction_id");
+                    
+                    $conn->commit();
+                    
+                    echo json_encode(['status' => 'success', 'message' => 'Payment deleted successfully']);
+                } catch (Exception $e) {
+                    $conn->rollback();
+                    echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
+                }
+                exit;
         }
     }
 }
@@ -1032,10 +1083,10 @@ if ($total_result && $transactions) {
                                                 <button type="button" class="edit-payment-btn text-blue-600 hover:text-blue-800" title="Edit" data-id="<?= $t['id'] ?>">
                                                     <i class="fas fa-edit text-xs"></i>
                                                 </button>
-                                                <button type="button" class="text-blue-600 hover:text-blue-800" title="Print" data-id="<?= $t['id'] ?>">
+                                                <button type="button" class="print-payment-btn text-blue-600 hover:text-blue-800" title="Print" data-id="<?= $t['id'] ?>">
                                                     <i class="fas fa-print text-xs"></i>
                                                 </button>
-                                                <button type="button" class="text-red-600 hover:text-red-800" title="Delete" data-id="<?= $t['id'] ?>" data-receipt-id="<?= htmlspecialchars($t['receipt_id']) ?>" data-amount="<?= $t['payment_amount'] ?>">
+                                                <button type="button" class="delete-payment-btn text-red-600 hover:text-red-800" title="Delete" data-id="<?= $t['id'] ?>" data-receipt-id="<?= htmlspecialchars($t['receipt_id']) ?>" data-amount="<?= $t['payment_amount'] ?>">
                                                     <i class="fas fa-trash text-xs"></i>
                                                 </button>
                                             </div>
@@ -1816,6 +1867,63 @@ if ($total_result && $transactions) {
                 });
             });
             
+            // Print payment button handler
+            $(document).on('click', '.print-payment-btn', function() {
+                const transactionId = $(this).data('id');
+                // Open print page in new window
+                window.open('print_payment_receipt.php?id=' + transactionId, '_blank');
+            });
+
+            // Delete payment button handler
+            $(document).on('click', '.delete-payment-btn', function() {
+                const transactionId = $(this).data('id');
+                const receiptId = $(this).data('receipt-id');
+                const amount = $(this).data('amount');
+                
+                Swal.fire({
+                    title: 'Delete Payment?',
+                    html: `Are you sure you want to delete payment <b>${receiptId}</b> for <b>₹${parseFloat(amount).toLocaleString('en-IN')}</b>?<br><br><span class="text-red-600 text-sm">This will reverse the balance adjustment for the customer.</span>`,
+                    icon: 'warning',
+                    showCancelButton: true,
+                    confirmButtonText: 'Yes, Delete',
+                    cancelButtonText: 'Cancel',
+                    confirmButtonColor: '#dc2626',
+                    cancelButtonColor: '#6b7280'
+                }).then((result) => {
+                    if (result.isConfirmed) {
+                        $.post('', {
+                            action: 'delete_payment',
+                            transaction_id: transactionId
+                        }, function(response) {
+                            if (response.status === 'success') {
+                                Swal.fire({
+                                    icon: 'success',
+                                    title: 'Deleted!',
+                                    text: 'Payment has been deleted successfully.',
+                                    timer: 1500,
+                                    showConfirmButton: false
+                                });
+                                setTimeout(() => {
+                                    location.reload();
+                                }, 1500);
+                            } else {
+                                Swal.fire({
+                                    icon: 'error',
+                                    title: 'Error',
+                                    text: response.message || 'Failed to delete payment'
+                                });
+                            }
+                        }, 'json').fail(function() {
+                            Swal.fire({
+                                icon: 'error',
+                                title: 'Error',
+                                text: 'Failed to process request'
+                            });
+                        });
+                    }
+                });
+            });
+
             // Reset form function
             function resetPaymentForm() {
                 // Clear customer selection

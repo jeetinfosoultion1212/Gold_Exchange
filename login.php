@@ -426,7 +426,8 @@ if (isset($_GET['success'])) {
                     <label for="password" class="form-label">Password</label>
                     <div class="input-wrapper">
                         <i class="fas fa-lock input-icon"></i>
-                        <input type="password" class="form-control" id="password" name="password" placeholder="Enter your password" required>
+                        <input type="password" class="form-control" id="password" name="password" placeholder="Enter your password" required style="padding-right: 2.5rem;">
+                        <i class="fas fa-eye toggle-password" id="togglePassword" style="position: absolute; right: 1rem; top: 50%; transform: translateY(-50%); cursor: pointer; color: var(--gray-400); z-index: 2;"></i>
                     </div>
                 </div>
                 
@@ -454,6 +455,20 @@ if (isset($_GET['success'])) {
     <script>
         // Auto-focus on username field
         document.getElementById('username').focus();
+        
+        // Toggle password visibility
+        const togglePassword = document.getElementById('togglePassword');
+        const passwordInput = document.getElementById('password');
+        
+        togglePassword.addEventListener('click', function() {
+            // Toggle the type attribute
+            const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
+            passwordInput.setAttribute('type', type);
+            
+            // Toggle the eye icon
+            this.classList.toggle('fa-eye');
+            this.classList.toggle('fa-eye-slash');
+        });
         
         // Handle form submission
         document.querySelector('form').addEventListener('submit', function(e) {

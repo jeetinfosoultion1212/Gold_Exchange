@@ -717,6 +717,12 @@ SELECT
     SUM(CASE WHEN transaction_type = 'Purchase' AND payment_method = 'Cash' THEN payment_amount ELSE 0 END) AS total_cash_purchase,
     SUM(CASE WHEN transaction_type = 'Purchase' AND payment_method IN ('Bank', 'UPI', 'Cheque') THEN payment_amount ELSE 0 END) AS total_bank_purchase,
     COUNT(CASE WHEN transaction_type = 'Purchase' THEN 1 END) AS total_purchases,
+
+    -- Amount Received (Sales)
+    SUM(CASE WHEN transaction_type = 'Received' AND payment_method = 'Cash' THEN payment_amount ELSE 0 END) AS total_cash_received,
+    SUM(CASE WHEN transaction_type = 'Received' AND payment_method = 'Bank' THEN payment_amount ELSE 0 END) AS total_bank_received,
+    SUM(CASE WHEN transaction_type = 'Received' AND payment_method = 'UPI' THEN payment_amount ELSE 0 END) AS total_upi_received,
+    SUM(CASE WHEN transaction_type = 'Received' AND payment_method = 'Cheque' THEN payment_amount ELSE 0 END) AS total_cheque_received,
     
     -- Stock information
     (SELECT current_stock FROM gold_stock WHERE purity = 99.50 AND company_id = $company_id ORDER BY id DESC LIMIT 1) AS purity_99_50_stock,
@@ -739,6 +745,26 @@ if ($stats_result) {
         'purity_99_90_stock' => 0,
         'purity_91_60_stock' => 0
     ];
+}
+
+// Get ALL gold stock information
+$stock_sql = "SELECT stock_name, purity, current_stock FROM gold_stock WHERE company_id = $company_id ORDER BY purity DESC";
+$stock_result = $conn->query($stock_sql);
+$all_stocks = [];
+if ($stock_result) {
+    while ($stock_row = $stock_result->fetch_assoc()) {
+        $all_stocks[] = $stock_row;
+    }
+}
+
+// Get cash in hand from account_balances table
+$cash_in_hand = 0;
+// We check for 'Cash' account type
+$cash_sql = "SELECT current_balance FROM account_balances WHERE company_id = $company_id AND account_type = 'Cash'";
+$cash_result = $conn->query($cash_sql);
+if ($cash_result && $cash_result->num_rows > 0) {
+    $cash_row = $cash_result->fetch_assoc();
+    $cash_in_hand = $cash_row['current_balance'] ?? 0;
 }
 
 // Get recent purchase transactions
@@ -1047,76 +1073,95 @@ if ($total_result && $transactions) {
 <!-- Main Content Container -->
 <div class="w-full">
         <!-- Colorful Statistics with Icons -->
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
-            <!-- Total Purchase Weight -->
-            <div class="soft-gradient-blue rounded-xl p-4 shadow-sm h-full">
+        <!-- Colorful Statistics with Icons -->
+        <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-7 gap-2 mb-6">
+            <!-- Purchase Weight -->
+            <div class="soft-gradient-green rounded-xl p-2 shadow-sm h-full">
                 <div class="flex items-center justify-between">
                     <div>
-                        <p class="text-xs font-medium text-blue-700 mb-1">Purchase Weight</p>
-                        <p class="text-lg font-bold text-blue-800 mb-0"><?= number_format($stats['total_purchase_weight'] ?? 0, 1) ?>g</p>
-                        <p class="text-xs text-blue-600 mb-0">Gold Purchased Today</p>
+                        <p class="text-xs font-medium text-green-700 mb-0.5">Purchase Weight</p>
+                        <p class="text-lg font-bold text-green-800 mb-0"><?= number_format($stats['total_purchase_weight'] ?? 0, 1) ?>g</p>
+                        <p class="text-xs text-green-600 mb-0">Gold Purchased Today</p>
                     </div>
-                    <div class="w-10 h-10 bg-blue-500 rounded-lg flex items-center justify-center">
-                        <i class="fas fa-shopping-basket text-white text-sm"></i>
+                    <div class="w-8 h-8 bg-green-500 rounded-lg flex items-center justify-center">
+                        <i class="fas fa-shopping-basket text-white text-xs"></i>
                     </div>
                 </div>
             </div>
             
-            <!-- Total Purchase Amount -->
-            <div class="soft-gradient-green rounded-xl p-4 shadow-sm h-full">
+            <!-- Total Amount -->
+            <div class="soft-gradient-purple rounded-xl p-2 shadow-sm h-full">
                 <div class="flex items-center justify-between">
                     <div>
-                        <p class="text-xs font-medium text-green-700 mb-1">Purchase Amount</p>
-                        <p class="text-lg font-bold text-green-800 mb-0">₹<?= number_format($stats['total_purchase_amount'] ?? 0, 0) ?></p>
-                        <p class="text-xs text-green-600 mb-0">Total Spent Today</p>
+                        <p class="text-xs font-medium text-purple-700 mb-0.5">Total Value</p>
+                        <p class="text-lg font-bold text-purple-800 mb-0">₹<?= number_format($stats['total_purchase_amount'] ?? 0, 0) ?></p>
+                        <p class="text-xs text-purple-600 mb-0">Purchase Value</p>
                     </div>
-                    <div class="w-10 h-10 bg-green-500 rounded-lg flex items-center justify-center">
-                        <i class="fas fa-coins text-white text-sm"></i>
+                    <div class="w-8 h-8 bg-purple-500 rounded-lg flex items-center justify-center">
+                        <i class="fas fa-coins text-white text-xs"></i>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Amount Received -->
+            <div class="soft-gradient-teal rounded-xl p-2 shadow-sm h-full">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-xs font-medium text-teal-700 mb-0.5">Amount Received</p>
+                        <p class="text-lg font-bold text-teal-800 mb-0">₹<?= number_format(($stats['total_cash_received'] ?? 0) + ($stats['total_bank_received'] ?? 0), 0) ?></p>
+                        <p class="text-xs text-teal-600 mb-0">Cash: ₹<?= number_format($stats['total_cash_received'] ?? 0, 0) ?> | Bank: ₹<?= number_format($stats['total_bank_received'] ?? 0, 0) ?></p>
+                    </div>
+                    <div class="w-8 h-8 bg-teal-500 rounded-lg flex items-center justify-center">
+                        <i class="fas fa-hand-holding-usd text-white text-xs"></i>
                     </div>
                 </div>
             </div>
             
-            <!-- Cash Purchase -->
-            <div class="soft-gradient-orange rounded-xl p-4 shadow-sm h-full">
+            <!-- Amount Paid -->
+            <div class="bg-danger-soft rounded-xl p-2 shadow-sm h-full">
                 <div class="flex items-center justify-between">
                     <div>
-                        <p class="text-xs font-medium text-orange-700 mb-1">Cash Purchase</p>
-                        <p class="text-lg font-bold text-orange-800 mb-0">₹<?= number_format($stats['total_cash_purchase'] ?? 0, 0) ?></p>
-                        <p class="text-xs text-orange-600 mb-0">Cash Payments</p>
+                        <p class="text-xs font-medium text-red-700 mb-0.5">Amount Paid</p>
+                        <p class="text-lg font-bold text-red-800 mb-0">₹<?= number_format(($stats['total_cash_purchase'] ?? 0) + ($stats['total_bank_purchase'] ?? 0), 0) ?></p>
+                        <p class="text-xs text-red-600 mb-0">Cash: ₹<?= number_format($stats['total_cash_purchase'] ?? 0, 0) ?> | Bank: ₹<?= number_format($stats['total_bank_purchase'] ?? 0, 0) ?></p>
                     </div>
-                    <div class="w-10 h-10 bg-orange-500 rounded-lg flex items-center justify-center">
-                        <i class="fas fa-money-bill-wave text-white text-sm"></i>
+                    <div class="w-8 h-8 bg-red-500 rounded-lg flex items-center justify-center">
+                        <i class="fas fa-money-bill-wave text-white text-xs"></i>
                     </div>
                 </div>
             </div>
-            
-            <!-- Bank Purchase -->
-            <div class="soft-gradient-purple rounded-xl p-4 shadow-sm h-full">
+
+            <!-- Cash in Hand -->
+            <div class="soft-gradient-blue rounded-xl p-2 shadow-sm h-full">
                 <div class="flex items-center justify-between">
                     <div>
-                        <p class="text-xs font-medium text-purple-700 mb-1">Bank Purchase</p>
-                        <p class="text-lg font-bold text-purple-800 mb-0">₹<?= number_format($stats['total_bank_purchase'] ?? 0, 0) ?></p>
-                        <p class="text-xs text-purple-600 mb-0">Bank Payments</p>
+                        <p class="text-xs font-medium text-cyan-700 mb-0.5">Cash in Hand</p>
+                        <p class="text-lg font-bold text-cyan-800 mb-0">₹<?= number_format($cash_in_hand, 0) ?></p>
+                        <p class="text-xs text-cyan-600 mb-0">Current Balance</p>
                     </div>
-                    <div class="w-10 h-10 bg-purple-500 rounded-lg flex items-center justify-center">
-                        <i class="fas fa-university text-white text-sm"></i>
+                    <div class="w-8 h-8 bg-cyan-500 rounded-lg flex items-center justify-center">
+                        <i class="fas fa-wallet text-white text-xs"></i>
                     </div>
                 </div>
             </div>
-            
-            <!-- Total Purchases -->
-            <div class="soft-gradient-teal rounded-xl p-4 shadow-sm h-full">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-xs font-medium text-teal-700 mb-1">Total Purchases</p>
-                        <p class="text-lg font-bold text-teal-800 mb-0"><?= number_format($stats['total_purchases'] ?? 0, 0) ?></p>
-                        <p class="text-xs text-teal-600 mb-0">Transactions Today</p>
+
+            <!-- Stock Cards (Dynamic) -->
+            <?php if (!empty($all_stocks)): ?>
+                <?php foreach ($all_stocks as $stock): ?>
+                    <div class="soft-gradient-orange rounded-xl p-2 shadow-sm h-full">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <p class="text-xs font-medium text-orange-700 mb-0.5"><?= htmlspecialchars($stock['stock_name']) ?></p>
+                                <p class="text-lg font-bold text-orange-800 mb-0"><?= number_format($stock['current_stock'], 3) ?>g</p>
+                                <p class="text-xs text-orange-600 mb-0">Purity: <?= number_format($stock['purity'], 2) ?>%</p>
+                            </div>
+                            <div class="w-8 h-8 bg-orange-500 rounded-lg flex items-center justify-center">
+                                <i class="fas fa-box text-white text-xs"></i>
+                            </div>
+                        </div>
                     </div>
-                    <div class="w-10 h-10 bg-teal-500 rounded-lg flex items-center justify-center">
-                        <i class="fas fa-receipt text-white text-sm"></i>
-                    </div>
-                </div>
-            </div>
+                <?php endforeach; ?>
+            <?php endif; ?>
         </div>
 
         <!-- Main Form and List Layout -->
@@ -1134,9 +1179,10 @@ if ($total_result && $transactions) {
                         <input type="hidden" name="action" value="save_purchase">
                         <input type="hidden" name="transaction_id" id="editTransactionId" value="">
                         
-                        <!-- Row 1: Purchase ID & Date -->
-                        <div class="grid grid-cols-2 gap-3">
-                            <div>
+                        <!-- Row 1: Purchase ID, Date & Party Selection -->
+                        <div class="grid grid-cols-1 md:grid-cols-12 gap-3">
+                            <!-- Purchase ID (25%) -->
+                            <div class="md:col-span-3">
                                 <label class="block text-sm font-medium text-gray-700 mb-1">Purchase ID <span id="editModeIndicator" class="text-xs text-orange-600 font-semibold hidden">(Editing)</span></label>
                                 <div class="relative">
                                     <input type="text" class="block w-full px-3 py-2 pr-10 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 cursor-pointer" name="receipt_id" readonly id="purchaseIdInput" tabindex="0">
@@ -1146,30 +1192,32 @@ if ($total_result && $transactions) {
                                 </div>
                                 <div id="purchaseList" class="absolute z-10 mt-1 bg-white border border-gray-200 rounded-lg shadow-xl max-h-64 overflow-y-auto hidden" style="width: 400px; max-width: 90vw;"></div>
                             </div>
-                            <div>
+                            
+                            <!-- Date (25%) -->
+                            <div class="md:col-span-3">
                                 <label class="block text-sm font-medium text-gray-700 mb-1">Date</label>
-                                <input type="datetime-local" class="block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" name="date_of_transaction" required>
+                                <input type="datetime-local" class="block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" name="date_of_transaction" value="<?= date('Y-m-d\TH:i') ?>" required>
                             </div>
-                        </div>
 
-                        <!-- Row 2: Party Selection -->
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Party Name</label>
-                            <div class="relative">
-                                <input type="hidden" name="party_id" id="partyId">
-                                <input type="text" 
-                                       class="block w-full pl-3 pr-20 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500" 
-                                       name="party_name" 
-                                       id="partyNameInput"
-                                       autocomplete="off"
-                                       required 
-                                       placeholder="Enter party name...">
-                                <div class="absolute inset-y-0 right-0 flex items-center pr-2">
-                                    <button type="button" class="px-3 py-1 text-sm bg-purple-500 text-white rounded-lg hover:bg-purple-600" id="addNewPartyBtn" title="Add New Party (Alt+A)">
-                                        <i class="fas fa-plus mr-1"></i>New
-                                    </button>
+                            <!-- Party Name (50%) -->
+                            <div class="md:col-span-6">
+                                <label class="block text-sm font-medium text-gray-700 mb-1">Party Name</label>
+                                <div class="relative">
+                                    <input type="hidden" name="party_id" id="partyId">
+                                    <input type="text" 
+                                           class="block w-full pl-3 pr-20 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-purple-500" 
+                                           name="party_name" 
+                                           id="partyNameInput"
+                                           autocomplete="off"
+                                           required 
+                                           placeholder="Enter party name...">
+                                    <div class="absolute inset-y-0 right-0 flex items-center pr-2">
+                                        <button type="button" class="px-3 py-1 text-sm bg-purple-500 text-white rounded-lg hover:bg-purple-600 transition-colors duration-200" id="addNewPartyBtn" title="Add New Party (Alt+A)">
+                                            <i class="fas fa-plus mr-1"></i>New
+                                        </button>
+                                    </div>
+                                    <div id="partyList" class="absolute top-full left-0 right-0 bg-white border border-gray-200 rounded-lg shadow-xl max-h-64 overflow-y-auto z-50 hidden" style="width: calc(100% - 0px);"></div>
                                 </div>
-                                <div id="partyList" class="absolute top-full left-0 right-0 bg-white border border-gray-200 rounded-lg shadow-xl max-h-64 overflow-y-auto z-50 hidden" style="width: calc(100% - 0px);"></div>
                             </div>
                         </div>
 
