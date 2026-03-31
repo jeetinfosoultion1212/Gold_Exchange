@@ -26,3 +26,6 @@ npm-debug.log*
 # OS
 Thumbs.db
 Desktop.ini
+
+# Desktop Binaries (Too large for Git)
+desktop_package/
