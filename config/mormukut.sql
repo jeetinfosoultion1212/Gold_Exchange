@@ -87,7 +87,8 @@ CREATE TABLE `companies` (
   `company_email` varchar(100) DEFAULT NULL,
   `company_logo` varchar(255) DEFAULT NULL,
   `created_at` timestamp NULL DEFAULT current_timestamp(),
-  `status` enum('Active','Inactive') DEFAULT 'Active'
+  `status` enum('Active','Inactive') DEFAULT 'Active',
+  `pin` varchar(10) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 --
@@ -157,6 +158,8 @@ CREATE TABLE `gold_sales` (
 CREATE TABLE `gold_stock` (
   `id` int(11) NOT NULL,
   `company_id` int(11) NOT NULL,
+  `category` enum('Gold','Silver') DEFAULT 'Gold',
+  `mode` enum('Cash','Bank') DEFAULT 'Cash' COMMENT 'Cash=Kachha, Bank=Pakka',
   `purity` decimal(5,2) NOT NULL,
   `stock_name` varchar(50) NOT NULL,
   `current_stock` decimal(10,3) NOT NULL DEFAULT 0.000,
@@ -178,10 +181,20 @@ CREATE TABLE `parties` (
   `address` text DEFAULT NULL,
   `current_balance` decimal(15,2) DEFAULT 0.00,
   `current_gold_balance` decimal(10,3) DEFAULT 0.000,
+  `current_silver_balance` decimal(10,3) DEFAULT 0.000,
   `cash_balance` decimal(15,2) DEFAULT 0.00,
   `bank_balance` decimal(15,2) DEFAULT 0.00,
-  `cash_gold_balance` decimal(10,3) DEFAULT 0.000,
-  `bank_gold_balance` decimal(10,3) DEFAULT 0.000,
+  `cash_gold_balance` decimal(15,3) DEFAULT 0.000,
+  `bank_gold_balance` decimal(15,3) DEFAULT 0.000,
+  `cash_silver_balance` decimal(15,3) DEFAULT 0.000,
+  `bank_silver_balance` decimal(15,3) DEFAULT 0.000,
+  `gstin` varchar(20) DEFAULT NULL,
+  `state` varchar(50) DEFAULT NULL,
+  `city` varchar(50) DEFAULT NULL,
+  `bank_details` text DEFAULT NULL,
+  `opening_cash_balance` decimal(15,2) DEFAULT 0.00,
+  `opening_bank_balance` decimal(15,2) DEFAULT 0.00,
+  `opening_gold_balance` decimal(15,3) DEFAULT 0.000,
   `created_at` timestamp NULL DEFAULT current_timestamp(),
   `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp()
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -277,6 +290,23 @@ CREATE TABLE `transactions` (
   `payment_status` enum('Paid','Partial','Due','Pending') DEFAULT 'Pending' COMMENT 'Payment status',
   `created_by` int(11) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- --------------------------------------------------------
+
+--
+-- Table structure for table `exchange_items`
+--
+
+CREATE TABLE `exchange_items` (
+  `id` int(11) NOT NULL,
+  `transaction_id` int(11) NOT NULL,
+  `company_id` int(11) NOT NULL,
+  `item_type` enum('received','issued') NOT NULL COMMENT 'received = old gold items, issued = fine gold given',
+  `weight` decimal(10,3) DEFAULT NULL COMMENT 'Weight in grams',
+  `purity` decimal(5,2) DEFAULT NULL COMMENT 'Purity percentage',
+  `fine_weight` decimal(10,3) DEFAULT NULL COMMENT 'Calculated fine gold weight',
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Stores individual items for multi-item gold exchange transactions';
 
 -- --------------------------------------------------------
 
@@ -433,6 +463,14 @@ ALTER TABLE `transactions`
   ADD KEY `idx_transactions_gold_weight` (`gold_weight`);
 
 --
+-- Indexes for table `exchange_items`
+--
+ALTER TABLE `exchange_items`
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `transaction_id` (`transaction_id`),
+  ADD KEY `company_id` (`company_id`);
+
+--
 -- Indexes for table `users`
 --
 ALTER TABLE `users`
@@ -506,6 +544,12 @@ ALTER TABLE `transactions`
   MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
 
 --
+-- AUTO_INCREMENT for table `exchange_items`
+--
+ALTER TABLE `exchange_items`
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT;
+
+--
 -- AUTO_INCREMENT for table `users`
 --
 ALTER TABLE `users`
@@ -520,6 +564,14 @@ ALTER TABLE `users`
 --
 ALTER TABLE `account_balances`
   ADD CONSTRAINT `account_balances_ibfk_1` FOREIGN KEY (`company_id`) REFERENCES `companies` (`id`) ON DELETE CASCADE;
+
+--
+-- Constraints for table `exchange_items`
+--
+ALTER TABLE `exchange_items`
+  ADD CONSTRAINT `exchange_items_ibfk_1` FOREIGN KEY (`transaction_id`) REFERENCES `transactions` (`id`) ON DELETE CASCADE,
+  ADD CONSTRAINT `exchange_items_ibfk_2` FOREIGN KEY (`company_id`) REFERENCES `companies` (`id`) ON DELETE CASCADE;
+
 COMMIT;
 
 /*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;

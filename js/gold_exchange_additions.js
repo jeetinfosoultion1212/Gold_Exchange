@@ -153,40 +153,46 @@ function selectReceipt(receiptId) {
 
 // Search transaction by receipt ID
 function searchByReceiptId(receiptId) {
-    $.ajax({
-        url: '',
-        method: 'POST',
-        dataType: 'json',
-        data: {
-            action: 'get_exchange_by_receipt_id',
-            receipt_id: receiptId
-        },
-        success: function (response) {
-            if (response.status === 'success') {
-                populateFormForEdit(response.data);
-                Swal.fire({
-                    icon: 'success',
-                    title: 'Receipt Found',
-                    text: 'Transaction loaded for editing',
-                    timer: 1500,
-                    showConfirmButton: false
-                });
-            } else {
+    // Use the multi-item load function
+    if (typeof loadTransactionMultiItem === 'function') {
+        loadTransactionMultiItem(receiptId);
+    } else {
+        // Fallback to old method if multi-item function not available
+        $.ajax({
+            url: '',
+            method: 'POST',
+            dataType: 'json',
+            data: {
+                action: 'get_exchange_by_receipt_id',
+                receipt_id: receiptId
+            },
+            success: function (response) {
+                if (response.status === 'success') {
+                    populateFormForEdit(response.data);
+                    Swal.fire({
+                        icon: 'success',
+                        title: 'Receipt Found',
+                        text: 'Transaction loaded for editing',
+                        timer: 1500,
+                        showConfirmButton: false
+                    });
+                } else {
+                    Swal.fire({
+                        icon: 'error',
+                        title: 'Not Found',
+                        text: response.message || 'Receipt not found'
+                    });
+                }
+            },
+            error: function () {
                 Swal.fire({
                     icon: 'error',
-                    title: 'Not Found',
-                    text: response.message || 'Receipt not found'
+                    title: 'Error',
+                    text: 'Failed to search receipt'
                 });
             }
-        },
-        error: function () {
-            Swal.fire({
-                icon: 'error',
-                title: 'Error',
-                text: 'Failed to search receipt'
-            });
-        }
-    });
+        });
+    }
 }
 
 // Populate form with transaction data for editing
@@ -216,9 +222,9 @@ function populateFormForEdit(data) {
     $('#submitIcon').removeClass('fa-exchange-alt').addClass('fa-save');
 
     // Trigger calculations
-    calculateFineWeight();
-    calculateDifference();
-    calculateAmount();
+    if (typeof calculateFineWeight === 'function') calculateFineWeight();
+    if (typeof calculateDifference === 'function') calculateDifference();
+    if (typeof calculateAmount === 'function') calculateAmount();
 
     // Update payment status after calculations
     if (typeof updatePaymentStatus === 'function') {
@@ -240,96 +246,83 @@ function printExchangeReceipt(exchangeData, companyName) {
         ? new Date(exchangeData.date_of_transaction).toLocaleString('en-IN')
         : new Date().toLocaleString('en-IN');
 
+    // Build received items rows
+    let receivedItemsHtml = '';
+    let totalFine = 0;
+
+    if (exchangeData.received_items && exchangeData.received_items.length > 0) {
+        exchangeData.received_items.forEach((item, index) => {
+            const fine = parseFloat(item.fine || item.fine_weight);
+            totalFine += fine;
+
+            receivedItemsHtml += `
+            <tr>
+                <td style="text-align:center; padding:4px 2px;">${index + 1}</td>
+                <td style="text-align:right; padding:4px 2px;">${parseFloat(item.weight).toFixed(3)}</td>
+                <td style="text-align:right; padding:4px 2px;">${parseFloat(item.purity).toFixed(2)}</td>
+                <td style="text-align:right; padding:4px 2px;">${fine.toFixed(3)}</td>
+            </tr>`;
+        });
+    } else {
+        const weight = parseFloat(exchangeData.received_weight || 0);
+        const purity = parseFloat(exchangeData.purity || 0);
+        const fine = parseFloat(exchangeData.fine_weight || 0);
+        totalFine = fine;
+
+        receivedItemsHtml = `
+        <tr>
+            <td style="text-align:center; padding:4px 2px;">1</td>
+            <td style="text-align:right; padding:4px 2px;">${weight.toFixed(3)}</td>
+            <td style="text-align:right; padding:4px 2px;">${purity.toFixed(2)}</td>
+            <td style="text-align:right; padding:4px 2px;">${fine.toFixed(3)}</td>
+        </tr>`;
+    }
+
     const printContent = `
         <!DOCTYPE html>
         <html>
         <head>
             <title>Print Receipt - ${exchangeData.receipt_id}</title>
             <style>
-                @page {
-                    size: 80mm auto;
-                    margin: 5mm;
-                }
-                
-                * {
-                    margin: 0;
-                    padding: 0;
-                    box-sizing: border-box;
-                }
-                
+                @page { size: 80mm auto; margin: 5mm; }
+                * { margin: 0; padding: 0; box-sizing: border-box; }
                 body {
                     font-family: 'Courier New', monospace;
-                    font-size: 11pt;
+                    font-weight: bold;
+                    font-size: 12pt;
                     width: 70mm;
                     margin: 0 auto;
                     padding: 5mm;
                 }
-                
                 .receipt-header {
                     text-align: center;
-                    border-bottom: 1px dashed #000;
+                    border-bottom: 2px dashed #000;
                     padding-bottom: 8px;
                     margin-bottom: 8px;
                 }
-                
-                .company-name {
-                    font-size: 14pt;
-                    font-weight: bold;
-                    margin-bottom: 3px;
-                }
-                
-                .receipt-title {
-                    font-size: 10pt;
-                    color: #666;
-                }
-                
-                .receipt-body {
-                    font-size: 10pt;
-                    line-height: 1.4;
-                }
-                
-                .receipt-row {
-                    display: flex;
-                    justify-content: space-between;
-                    margin-bottom: 4px;
-                }
-                
-                .receipt-label {
-                    color: #333;
-                }
-                
-                .receipt-value {
-                    font-weight: bold;
-                }
-                
-                .receipt-divider {
-                    border-top: 1px dashed #000;
-                    margin: 8px 0;
-                }
-                
-                .receipt-section {
-                    background: #f5f5f5;
-                    padding: 8px;
-                    margin: 8px 0;
-                    border-radius: 3px;
-                }
-                
+                .company-name { font-size: 16pt; font-weight: 900; margin-bottom: 3px; }
+                .receipt-title { font-size: 11pt; font-weight: bold; }
+                .receipt-body { font-size: 11pt; line-height: 1.4; font-weight: bold; }
+                .receipt-row { display: flex; justify-content: space-between; margin-bottom: 5px; }
+                .receipt-label { color: #000; font-weight: bold; }
+                .receipt-value { font-weight: 900; }
+                .receipt-divider { border-top: 2px dashed #000; margin: 10px 0; }
+                .receipt-section { margin: 10px 0; }
                 .receipt-footer {
                     text-align: center;
-                    border-top: 1px dashed #000;
-                    padding-top: 8px;
-                    margin-top: 8px;
-                    font-size: 9pt;
-                    color: #666;
+                    border-top: 2px dashed #000;
+                    padding-top: 10px;
+                    margin-top: 10px;
+                    font-size: 10pt;
+                    font-weight: bold;
                 }
-                
+                table { width: 100%; border-collapse: collapse; font-size: 11pt; font-weight: bold; }
+                th { text-align: right; border-bottom: 2px dashed #000; padding: 4px 2px; }
+                th:first-child { text-align: center; }
+                td { padding: 4px 2px; }
                 @media print {
-                    body {
-                        width: 70mm;
-                    }
-                    @page {
-                        margin: 0;
-                    }
+                    body { width: 70mm; }
+                    @page { margin: 0; }
                 }
             </style>
         </head>
@@ -354,30 +347,39 @@ function printExchangeReceipt(exchangeData, companyName) {
                 </div>
                 
                 <div class="receipt-divider"></div>
+                <div style="font-size: 11pt; font-weight: 900; margin-bottom: 5px;">Received Items:</div>
+                
+                <table>
+                    <thead>
+                        <tr>
+                            <th width="10%">#</th>
+                            <th width="30%">Wt(g)</th>
+                            <th width="25%">Pur%</th>
+                            <th width="35%">Fine(g)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${receivedItemsHtml}
+                        <tr>
+                            <td colspan="3" style="text-align:right; font-weight:900; border-top:2px dashed #000; padding-top:6px;">TOTAL FINE:</td>
+                            <td style="text-align:right; font-weight:900; border-top:2px dashed #000; padding-top:6px;">${totalFine.toFixed(3)}</td>
+                        </tr>
+                    </tbody>
+                </table>
+                
+                <div class="receipt-divider"></div>
                 
                 <div class="receipt-row">
-                    <span class="receipt-label">Received Weight:</span>
-                    <span class="receipt-value">${parseFloat(exchangeData.received_weight).toFixed(3)} g</span>
+                    <span class="receipt-label" style="font-weight:normal;">Issue Weight:</span>
+                    <span class="receipt-value">${parseFloat(exchangeData.delivered_weight || exchangeData.issue_weight || 0).toFixed(3)} g</span>
                 </div>
                 <div class="receipt-row">
-                    <span class="receipt-label">Purity:</span>
-                    <span>${parseFloat(exchangeData.purity).toFixed(2)}%</span>
-                </div>
-                <div class="receipt-row">
-                    <span class="receipt-label">Fine Weight:</span>
-                    <span>${parseFloat(exchangeData.fine_weight).toFixed(3)} g</span>
-                </div>
-                <div class="receipt-row">
-                    <span class="receipt-label">Issue Weight:</span>
-                    <span>${parseFloat(exchangeData.issue_weight).toFixed(3)} g</span>
-                </div>
-                <div class="receipt-row">
-                    <span class="receipt-label">Difference:</span>
+                    <span class="receipt-label" style="font-weight:normal;">Difference:</span>
                     <span class="receipt-value">${parseFloat(exchangeData.difference_weight).toFixed(3)} g</span>
                 </div>
                 <div class="receipt-row">
-                    <span class="receipt-label">Rate:</span>
-                    <span>₹${parseFloat(exchangeData.rate).toLocaleString('en-IN', { minimumFractionDigits: 2 })}/g</span>
+                    <span class="receipt-label" style="font-weight:normal;">Rate:</span>
+                    <span class="receipt-value">₹${parseFloat(exchangeData.rate).toLocaleString('en-IN', { minimumFractionDigits: 2 })}/g</span>
                 </div>
                 
                 <div class="receipt-divider"></div>
@@ -385,14 +387,14 @@ function printExchangeReceipt(exchangeData, companyName) {
                 <div class="receipt-section">
                     <div class="receipt-row">
                         <span class="receipt-label">Amount:</span>
-                        <span class="receipt-value" style="font-size: 12pt;">₹${parseFloat(exchangeData.amount).toLocaleString('en-IN')}</span>
+                        <span class="receipt-value" style="font-size: 14pt;">₹${parseFloat(exchangeData.amount).toLocaleString('en-IN')}</span>
                     </div>
                     <div class="receipt-row">
                         <span class="receipt-label">${exchangeData.payment_type === 'Payment_In' ? 'Received' : 'Paid'}:</span>
-                        <span style="color: ${exchangeData.payment_type === 'Payment_In' ? '#28a745' : '#dc3545'};">₹${parseFloat(exchangeData.payment_amount).toLocaleString('en-IN')}</span>
+                        <span style="font-weight:900;">₹${parseFloat(exchangeData.payment_amount).toLocaleString('en-IN')}</span>
                     </div>
                     <div class="receipt-row">
-                        <span class="receipt-label">Payment Method:</span>
+                        <span class="receipt-label">Pay Mode:</span>
                         <span>${exchangeData.payment_method}</span>
                     </div>
                     <div class="receipt-row">
@@ -404,8 +406,8 @@ function printExchangeReceipt(exchangeData, companyName) {
                 ${exchangeData.narration ? `
                 <div class="receipt-divider"></div>
                 <div>
-                    <div style="font-size: 9pt; color: #666; margin-bottom: 2px;">Note:</div>
-                    <div style="font-size: 9pt;">${exchangeData.narration}</div>
+                    <div style="font-size: 10pt; font-weight: bold; margin-bottom: 2px;">Note:</div>
+                    <div style="font-size: 11pt; font-weight: bold;">${exchangeData.narration}</div>
                 </div>
                 ` : ''}
             </div>

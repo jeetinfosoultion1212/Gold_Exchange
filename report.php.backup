@@ -26,8 +26,11 @@ $sql = "SELECT
             SUM(CASE WHEN t.transaction_type = 'Sale' THEN t.gold_weight ELSE 0 END) as sale_weight,
             SUM(CASE WHEN t.transaction_type = 'Purchase' THEN t.gold_weight ELSE 0 END) as purchase_weight,
             SUM(CASE WHEN t.transaction_type = 'Exchange' THEN t.gold_weight ELSE 0 END) as issue_weight,
-            SUM(CASE WHEN t.transaction_type = 'Exchange' THEN t.received_weight ELSE 0 END) as exchange_received_weight,
-            SUM(CASE WHEN t.transaction_type = 'Received' THEN t.gold_weight ELSE 0 END) as gold_received_weight,
+            SUM(CASE 
+                WHEN t.transaction_type = 'Received' THEN t.gold_weight 
+                WHEN t.transaction_type = 'Exchange' THEN t.received_weight 
+                ELSE 0 
+            END) as gold_received_weight,
             
             -- Payment In (Received from Party)
             SUM(CASE WHEN (t.transaction_type = 'Payment' OR t.transaction_type = 'Received') AND t.payment_type = 'Payment_In' AND (t.payment_method = 'Cash' OR t.payment_method IS NULL OR t.payment_method = '') THEN t.payment_amount ELSE 0 END) as cash_in,
@@ -61,17 +64,47 @@ if ($result) {
 // 2. Bank Balance (Total Bank In - Total Bank Out)
 // 3. Gold Stock (Grouped by Purity)
 
-// Cash/Bank Balance (All Time) - Fetched from account_balances table
+// Cash/Bank Balance (All Time) - Fixed to only count actual Payment/Received transactions
+// Cash In Hand = Total Cash Received (Payment_In) - Total Cash Paid Out (Payment_Out)
+// Bank Balance = Total Bank Received (Payment_In) - Total Bank Paid Out (Payment_Out)
+// Only count Payment, Received AND Exchange transactions
 $balance_sql = "SELECT 
-    COALESCE(SUM(CASE WHEN account_type = 'Cash' THEN current_balance ELSE 0 END), 0) as cash_balance,
-    COALESCE(SUM(CASE WHEN account_type = 'Bank' THEN current_balance ELSE 0 END), 0) as bank_balance
-FROM account_balances
+    COALESCE(SUM(CASE 
+        WHEN transaction_type IN ('Payment', 'Received') 
+        AND payment_type = 'Payment_In' 
+        AND payment_method = 'Cash' 
+        THEN payment_amount 
+        ELSE 0 
+    END), 0) - 
+    COALESCE(SUM(CASE 
+        WHEN transaction_type IN ('Payment', 'Purchase') 
+        AND payment_type = 'Payment_Out' 
+        AND payment_method = 'Cash' 
+        THEN payment_amount 
+        ELSE 0 
+    END), 0) as cash_balance,
+    
+    COALESCE(SUM(CASE 
+        WHEN transaction_type IN ('Payment', 'Received') 
+        AND payment_type = 'Payment_In' 
+        AND payment_method IN ('Bank', 'UPI', 'Cheque') 
+        THEN payment_amount 
+        ELSE 0 
+    END), 0) - 
+    COALESCE(SUM(CASE 
+        WHEN transaction_type IN ('Payment', 'Purchase') 
+        AND payment_type = 'Payment_Out' 
+        AND payment_method IN ('Bank', 'UPI', 'Cheque') 
+        THEN payment_amount 
+        ELSE 0 
+    END), 0) as bank_balance
+FROM transactions
 WHERE company_id = $company_id";
 $balance_result = $conn->query($balance_sql);
 $balance_data = $balance_result->fetch_assoc();
 
-// Stock by Category and Mode
-$stock_sql = "SELECT id, category, mode, stock_name, purity, current_stock FROM gold_stock WHERE company_id = $company_id ORDER BY category ASC, mode ASC, purity DESC";
+// Gold Stock by Purity
+$stock_sql = "SELECT purity, current_stock FROM gold_stock WHERE company_id = $company_id ORDER BY purity DESC";
 $stock_result = $conn->query($stock_sql);
 $gold_stocks = [];
 if ($stock_result) {
@@ -80,15 +113,6 @@ if ($stock_result) {
     }
 }
 
-// Total Received Weight from Exchange Transactions
-$received_weight_sql = "SELECT COALESCE(SUM(received_weight), 0) as total_received_weight 
-    FROM transactions 
-    WHERE company_id = $company_id 
-    AND transaction_type = 'Exchange' 
-    AND DATE(date_of_transaction) BETWEEN '$start_date' AND '$end_date'";
-$received_weight_result = $conn->query($received_weight_sql);
-$received_weight_data = $received_weight_result->fetch_assoc();
-
 $page_title = "Daily Report";
 ob_start();
 ?>
@@ -96,127 +120,143 @@ ob_start();
 <div class="w-full">
 <div class="w-full">
     <!-- Compact Stats Grid -->
-    <!-- Ultra-Compact Stats Grid (Full Width) -->
-    <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-2 mb-4">
+    <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 mb-6">
         <!-- Cash Balance -->
-        <div class="bg-white rounded border border-gray-100 p-2 shadow-sm">
+        <div class="bg-white rounded-lg shadow-sm p-3 border border-gray-100 hover:shadow-md transition-shadow">
             <div class="flex flex-col">
                 <div class="flex items-center justify-between">
-                    <p class="text-[8px] font-bold text-gray-400 uppercase tracking-tighter">Cash In Hand</p>
+                    <p class="text-xs font-medium text-gray-500 uppercase tracking-wider">Cash In Hand</p>
                     <div class="relative">
-                        <button onclick="toggleDropdown('cash-dropdown')" class="text-gray-300 hover:text-gray-500">
-                            <i class="fas fa-ellipsis-v text-[8px]"></i>
+                        <button onclick="toggleDropdown('cash-dropdown')" class="text-gray-400 hover:text-gray-600 focus:outline-none">
+                            <i class="fas fa-ellipsis-v text-xs"></i>
                         </button>
-                        <div id="cash-dropdown" class="hidden absolute right-0 mt-1 w-32 bg-white rounded shadow-lg z-10 border border-gray-100 py-1">
-                            <button onclick="openAddCashModal()" class="block w-full text-left px-2 py-1 text-[9px] font-bold text-gray-700 hover:bg-gray-50">Add Cash</button>
-                            <button onclick="openTransactionsModal('cash')" class="block w-full text-left px-2 py-1 text-[9px] font-bold text-gray-700 hover:bg-gray-50">History</button>
-                            <button onclick="openResetCashModal()" class="block w-full text-left px-2 py-1 text-[9px] font-bold text-red-600 hover:bg-red-50">Reset</button>
+                        <div id="cash-dropdown" class="hidden absolute right-0 mt-1 w-40 bg-white rounded-md shadow-lg z-10 border border-gray-200">
+                            <button onclick="openAddCashModal()" class="block w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-100">
+                                <i class="fas fa-plus text-green-600 mr-1"></i> Add Cash
+                            </button>
+                            <button onclick="openTransactionsModal('cash')" class="block w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-100">
+                                <i class="fas fa-history text-blue-600 mr-1"></i> View Transactions
+                            </button>
+                            <button onclick="openResetCashModal()" class="block w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-100">
+                                <i class="fas fa-redo text-red-600 mr-1"></i> Reset Cash
+                            </button>
                         </div>
                     </div>
                 </div>
-                <div class="flex items-center justify-between mt-0.5">
-                    <p class="text-xs font-black text-slate-800 tracking-tighter">₹<?= number_format($balance_data['cash_balance'] ?? 0) ?></p>
-                    <i class="fas fa-money-bill-wave text-green-500 text-[10px] opacity-20"></i>
+                <div class="flex items-center justify-between mt-1">
+                    <p class="text-lg font-bold text-gray-800">₹<?= number_format($balance_data['cash_balance'] ?? 0) ?></p>
+                    <div class="p-1.5 bg-green-50 rounded-full">
+                        <i class="fas fa-money-bill-wave text-green-600 text-sm"></i>
+                    </div>
                 </div>
             </div>
         </div>
 
         <!-- Bank Balance -->
-        <div class="bg-white rounded border border-gray-100 p-2 shadow-sm">
+        <div class="bg-white rounded-lg shadow-sm p-3 border border-gray-100 hover:shadow-md transition-shadow">
             <div class="flex flex-col">
                 <div class="flex items-center justify-between">
-                    <p class="text-[8px] font-bold text-gray-400 uppercase tracking-tighter">Bank Balance</p>
+                    <p class="text-xs font-medium text-gray-500 uppercase tracking-wider">Bank Balance</p>
                     <div class="relative">
-                        <button onclick="toggleDropdown('bank-dropdown')" class="text-gray-300 hover:text-gray-500">
-                            <i class="fas fa-ellipsis-v text-[8px]"></i>
+                        <button onclick="toggleDropdown('bank-dropdown')" class="text-gray-400 hover:text-gray-600 focus:outline-none">
+                            <i class="fas fa-ellipsis-v text-xs"></i>
                         </button>
-                        <div id="bank-dropdown" class="hidden absolute right-0 mt-1 w-32 bg-white rounded shadow-lg z-10 border border-gray-100 py-1">
-                            <button onclick="openAddBankModal()" class="block w-full text-left px-2 py-1 text-[9px] font-bold text-gray-700 hover:bg-gray-50">Add Bank</button>
-                            <button onclick="openTransactionsModal('bank')" class="block w-full text-left px-2 py-1 text-[9px] font-bold text-gray-700 hover:bg-gray-50">History</button>
-                            <button onclick="openResetBankModal()" class="block w-full text-left px-2 py-1 text-[9px] font-bold text-red-600 hover:bg-red-50">Reset</button>
+                        <div id="bank-dropdown" class="hidden absolute right-0 mt-1 w-40 bg-white rounded-md shadow-lg z-10 border border-gray-200">
+                            <button onclick="openAddBankModal()" class="block w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-100">
+                                <i class="fas fa-plus text-green-600 mr-1"></i> Add Bank
+                            </button>
+                            <button onclick="openTransactionsModal('bank')" class="block w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-100">
+                                <i class="fas fa-history text-blue-600 mr-1"></i> View Transactions
+                            </button>
+                            <button onclick="openResetBankModal()" class="block w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-100">
+                                <i class="fas fa-redo text-red-600 mr-1"></i> Reset Bank
+                            </button>
                         </div>
                     </div>
                 </div>
-                <div class="flex items-center justify-between mt-0.5">
-                    <p class="text-xs font-black text-slate-800 tracking-tighter">₹<?= number_format($balance_data['bank_balance'] ?? 0) ?></p>
-                    <i class="fas fa-university text-blue-500 text-[10px] opacity-20"></i>
+                <div class="flex items-center justify-between mt-1">
+                    <p class="text-lg font-bold text-gray-800">₹<?= number_format($balance_data['bank_balance'] ?? 0) ?></p>
+                    <div class="p-1.5 bg-blue-50 rounded-full">
+                        <i class="fas fa-university text-blue-600 text-sm"></i>
+                    </div>
                 </div>
             </div>
         </div>
 
-        <!-- Stock Cards (Dynamic) -->
+        <!-- Gold Stock Cards (Dynamic) -->
         <?php if (!empty($gold_stocks)): ?>
             <?php foreach ($gold_stocks as $stock): ?>
                 <?php 
-                    $is_gold = $stock['category'] === 'Gold';
-                    $is_cash = $stock['mode'] === 'Cash';
                     $is_positive = $stock['current_stock'] >= 0;
-                    
-                    $metal_color = $is_gold ? 'text-amber-600' : 'text-slate-500';
-                    $metal_bg = $is_gold ? 'bg-amber-50' : 'bg-slate-50';
-                    $mode_color = $is_cash ? 'text-green-600' : 'text-blue-600';
-                    $mode_label = $is_cash ? 'K' : 'P';
-                    $status_color = $is_positive ? 'text-emerald-600' : 'text-red-600';
+                    $color_class = $is_positive ? 'text-emerald-600' : 'text-red-600';
+                    $bg_class = $is_positive ? 'bg-emerald-50' : 'bg-red-50';
+                    $icon = $is_positive ? 'fa-cubes' : 'fa-exclamation-circle';
+                    $status_text = $is_positive ? 'In Hand' : 'Shortage';
                 ?>
-                <div class="bg-white rounded border border-gray-100 p-2 shadow-sm">
+                <div class="bg-white rounded-lg shadow-sm p-3 border border-gray-100 hover:shadow-md transition-shadow">
                     <div class="flex flex-col">
                         <div class="flex justify-between items-start">
-                            <div class="flex items-center gap-1">
-                                <span class="text-[7px] px-1 py-0 rounded font-bold uppercase tracking-tighter <?= $metal_bg ?> <?= $metal_color ?>"><?= substr($stock['category'], 0, 1) ?></span>
-                                <span class="text-[7px] px-1 py-0 rounded font-bold uppercase tracking-tighter bg-gray-100 <?= $mode_color ?>"><?= $mode_label ?></span>
-                                <p class="text-[8px] font-bold text-slate-500 uppercase truncate max-w-[50px]"><?= htmlspecialchars($stock['stock_name']) ?></p>
+                            <div class="flex items-center gap-2">
+                                <p class="text-xs font-medium text-gray-500 uppercase tracking-wider">Gold (<?= $stock['purity'] ?>%)</p>
+                                <span class="text-[10px] px-1.5 py-0.5 rounded-full font-medium <?= $bg_class ?> <?= $color_class ?>">
+                                    <?= $status_text ?>
+                                </span>
                             </div>
-                            <button onclick="toggleDropdown('stock-dropdown-<?= $stock['id'] ?>')" class="text-gray-300 hover:text-gray-500">
-                                <i class="fas fa-ellipsis-v text-[8px]"></i>
-                            </button>
-                            <div id="stock-dropdown-<?= $stock['id'] ?>" class="hidden absolute right-0 mt-1 w-32 bg-white rounded shadow-lg z-10 border border-gray-100 p-1">
-                                <button onclick="openAddStockModal(<?= $stock['id'] ?>, '<?= htmlspecialchars($stock['stock_name']) ?>', <?= $stock['purity'] ?>)" class="block w-full text-left px-2 py-1 text-[9px] font-bold text-gray-700 hover:bg-gray-50">Add</button>
-                                <button onclick="openTransactionsModal('stock', <?= $stock['id'] ?>)" class="block w-full text-left px-2 py-1 text-[9px] font-bold text-gray-700 hover:bg-gray-50">History</button>
-                                <button onclick="openResetStockModal(<?= $stock['id'] ?>, '<?= htmlspecialchars($stock['stock_name']) ?>', <?= $stock['purity'] ?>)" class="block w-full text-left px-2 py-1 text-[9px] font-bold text-red-600 hover:bg-red-50">Reset</button>
+                            <div class="relative">
+                                <button onclick="toggleDropdown('stock-dropdown-<?= $stock['purity'] ?>')" class="text-gray-400 hover:text-gray-600 focus:outline-none">
+                                    <i class="fas fa-ellipsis-v text-xs"></i>
+                                </button>
+                                <div id="stock-dropdown-<?= $stock['purity'] ?>" class="hidden absolute right-0 mt-1 w-40 bg-white rounded-md shadow-lg z-10 border border-gray-200">
+                                    <button onclick="openAddStockModal(<?= $stock['purity'] ?>)" class="block w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-100">
+                                        <i class="fas fa-plus text-green-600 mr-1"></i> Add Stock
+                                    </button>
+                                    <button onclick="openTransactionsModal('stock', <?= $stock['purity'] ?>)" class="block w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-100">
+                                        <i class="fas fa-history text-blue-600 mr-1"></i> View Transactions
+                                    </button>
+                                    <button onclick="openResetStockModal(<?= $stock['purity'] ?>)" class="block w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-100">
+                                        <i class="fas fa-redo text-red-600 mr-1"></i> Reset Stock
+                                    </button>
+                                </div>
                             </div>
                         </div>
-                        <div class="flex items-baseline justify-between mt-0.5">
-                            <p class="text-xs font-black <?= $status_color ?> tracking-tighter">
-                                <?= number_format(abs($stock['current_stock']), 3) ?><span class="text-[9px] font-normal opacity-70 ml-0.5">g</span>
-                            </p>
-                            <span class="text-[8px] text-gray-400 font-bold"><?= number_format($stock['purity'], 1) ?>%</span>
+                        <div class="flex items-center justify-between mt-1">
+                            <p class="text-lg font-bold text-gray-800"><?= number_format(abs($stock['current_stock']), 3) ?> <span class="text-xs font-normal text-gray-500">g</span></p>
+                            <div class="p-1.5 <?= $bg_class ?> rounded-full">
+                                <i class="fas <?= $icon ?> <?= $color_class ?> text-sm"></i>
+                            </div>
                         </div>
                     </div>
                 </div>
             <?php endforeach; ?>
         <?php endif; ?>
     </div>
-        
-        <!-- Received Weight Stat -->
-        <!-- Legacy Received Weight Stat Removed - Now tracked in Gold Stock -->
-    </div>
 
-    <!-- Header & Filters (Compact) -->
-    <div class="bg-white rounded shadow-sm px-3 py-2 mb-4 border-b border-slate-100">
-        <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+    <!-- Header & Filters -->
+    <div class="bg-white rounded-xl shadow-sm p-6 mb-6">
+        <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div>
-                <h2 class="text-sm font-black text-slate-800 uppercase tracking-tighter">Daily Report</h2>
-                <p class="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Transaction Summary</p>
+                <h2 class="text-2xl font-bold text-gray-900">Daily Transaction Report</h2>
+                <p class="text-sm text-gray-500">Summary of all activities per party</p>
             </div>
             
-            <div class="flex flex-wrap items-center gap-2">
-                <button onclick="openAddStockModalFree()" class="px-3 py-1.5 bg-amber-600 text-white text-[10px] font-bold uppercase rounded shadow-sm hover:bg-amber-700 tracking-tighter">
-                    <i class="fas fa-plus mr-1"></i>Stock
+            <div class="flex flex-wrap items-end gap-3">
+                <button onclick="openAddStockModalFree()" class="inline-flex items-center px-4 py-2 bg-amber-600 text-white text-sm font-medium rounded-md hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-amber-500 shadow-sm">
+                    <i class="fas fa-plus mr-2"></i>Add Stock
                 </button>
-                <form class="flex flex-wrap items-center gap-2" method="GET">
-                    <div class="flex items-center bg-slate-50 border border-slate-200 rounded px-2 py-1">
-                        <label class="text-[9px] font-bold text-slate-400 uppercase mr-2 tracking-tighter">From</label>
-                        <input type="date" name="start_date" value="<?= $start_date ?>" class="bg-transparent border-none p-0 text-[10px] font-bold text-slate-700 focus:ring-0 w-24">
+                <form class="flex flex-wrap items-end gap-3" method="GET">
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700 mb-1">From Date</label>
+                        <input type="date" name="start_date" value="<?= $start_date ?>" class="block w-full rounded-md border-gray-300 shadow-sm focus:border-red-500 focus:ring-red-500 sm:text-sm px-3 py-2 border">
                     </div>
-                    <div class="flex items-center bg-slate-50 border border-slate-200 rounded px-2 py-1">
-                        <label class="text-[9px] font-bold text-slate-400 uppercase mr-2 tracking-tighter">To</label>
-                        <input type="date" name="end_date" value="<?= $end_date ?>" class="bg-transparent border-none p-0 text-[10px] font-bold text-slate-700 focus:ring-0 w-24">
+                    <div>
+                        <label class="block text-xs font-medium text-gray-700 mb-1">To Date</label>
+                        <input type="date" name="end_date" value="<?= $end_date ?>" class="block w-full rounded-md border-gray-300 shadow-sm focus:border-red-500 focus:ring-red-500 sm:text-sm px-3 py-2 border">
                     </div>
-                    <button type="submit" class="px-3 py-1.5 bg-red-600 text-white text-[10px] font-bold uppercase rounded shadow-sm hover:bg-red-700 tracking-tighter">
-                        <i class="fas fa-filter mr-1"></i>Filter
+                    <button type="submit" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500">
+                        <i class="fas fa-filter mr-2"></i> Filter
                     </button>
-                    <a href="export_report_pdf.php?start_date=<?= $start_date ?>&end_date=<?= $end_date ?>" target="_blank" class="px-3 py-1.5 bg-white border border-slate-200 text-slate-600 text-[10px] font-bold uppercase rounded hover:bg-slate-50 tracking-tighter shadow-sm">
-                        <i class="fas fa-file-pdf mr-1 text-red-500"></i>PDF
+                    <a href="export_report_pdf.php?start_date=<?= $start_date ?>&end_date=<?= $end_date ?>" target="_blank" class="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md shadow-sm text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500">
+                        <i class="fas fa-file-pdf mr-2 text-red-500"></i> Export PDF
                     </a>
                 </form>
             </div>
@@ -234,7 +274,6 @@ ob_start();
                             <th scope="col" class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Sale (g)</th>
                             <th scope="col" class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Purchase (g)</th>
                             <th scope="col" class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Issue (g)</th>
-                            <th scope="col" class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Received Wt (g)</th>
                             <th scope="col" class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Gold Rcv (g)</th>
                             <th scope="col" class="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider border-l border-gray-200">
                                 Payment Received (In)
@@ -262,11 +301,11 @@ ob_start();
                         </tr>
                         <?php else: ?>
                             <?php 
+                            // Totals
                             $total_booking = 0;
                             $total_sale = 0;
                             $total_purchase = 0;
                             $total_issue = 0;
-                            $total_exchange_rcv = 0;
                             $total_gold_rcv = 0;
                             $total_cash_in = 0;
                             $total_bank_in = 0;
@@ -279,7 +318,6 @@ ob_start();
                                 $total_sale += $row['sale_weight'];
                                 $total_purchase += $row['purchase_weight'];
                                 $total_issue += $row['issue_weight'];
-                                $total_exchange_rcv += $row['exchange_received_weight'];
                                 $total_gold_rcv += $row['gold_received_weight'];
                                 $total_cash_in += $row['cash_in'];
                                 $total_bank_in += $row['bank_in'];
@@ -307,9 +345,6 @@ ob_start();
                                     </td>
                                     <td class="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-500">
                                         <?= $row['gold_received_weight'] > 0 ? number_format($row['gold_received_weight'], 2) : '-' ?>
-                                    </td>
-                                    <td class="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-500">
-                                        <?= $row['exchange_received_weight'] > 0 ? number_format($row['exchange_received_weight'], 2) : '-' ?>
                                     </td>
                                     <td class="px-6 py-4 whitespace-nowrap text-sm text-right border-l border-gray-200">
                                         <div class="grid grid-cols-2 gap-4">
@@ -341,7 +376,6 @@ ob_start();
                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900"><?= number_format($total_purchase, 2) ?></td>
                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900"><?= number_format($total_issue, 2) ?></td>
                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900"><?= number_format($total_gold_rcv, 2) ?></td>
-                                <td class="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900"><?= number_format($total_exchange_rcv, 2) ?></td>
                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-right border-l border-gray-200">
                                     <div class="grid grid-cols-2 gap-4">
                                         <span class="text-green-700">₹<?= number_format($total_cash_in) ?></span>
@@ -373,44 +407,37 @@ ob_start();
             </button>
         </div>
         <form id="addStockForm" onsubmit="submitStockAction(event, 'add_stock')">
-            <div class="mb-3">
-                <label class="block text-[11px] font-bold text-gray-700 mb-1 uppercase tracking-tighter">Category <span class="text-red-500">*</span></label>
-                <select name="category" required class="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-amber-500">
-                    <option value="Gold">Gold</option>
-                    <option value="Silver">Silver</option>
-                </select>
-            </div>
-            <div class="mb-3">
-                <label class="block text-[11px] font-bold text-gray-700 mb-1 uppercase tracking-tighter">Stock Name <span class="text-red-500">*</span></label>
-                <input type="text" name="stock_name" required placeholder="e.g., Fine, 22K, 18K" class="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-amber-500">
-            </div>
-            <div class="grid grid-cols-2 gap-3 mb-3">
-                <div>
-                    <label class="block text-[11px] font-bold text-gray-700 mb-1 uppercase tracking-tighter">Purity (%) <span class="text-red-500">*</span></label>
-                    <input type="number" step="0.01" name="purity" id="addStockPurityInput" required min="0" max="100" placeholder="0.00" class="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-amber-500">
-                </div>
-                <div>
-                    <label class="block text-[11px] font-bold text-gray-700 mb-1 uppercase tracking-tighter">Weight (g) <span class="text-red-500">*</span></label>
-                    <input type="number" step="0.001" name="amount" required placeholder="0.000" class="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-amber-500">
-                </div>
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Stock Name <span class="text-red-500">*</span></label>
+                <input type="text" name="stock_name" required placeholder="e.g., Fine Gold, 22K Gold, etc." class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-amber-500 focus:border-amber-500">
             </div>
             <div class="mb-4">
-                <label class="block text-[11px] font-bold text-gray-700 mb-1 uppercase tracking-tighter">Mode <span class="text-red-500">*</span></label>
-                <select name="stock_type" required class="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-amber-500">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Purity (%) <span class="text-red-500">*</span></label>
+                <input type="number" step="0.01" name="purity" id="addStockPurityInput" required min="0" max="100" placeholder="e.g., 99.90, 91.60, 75.00" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-amber-500 focus:border-amber-500">
+                <p class="text-xs text-gray-500 mt-1">Enter purity percentage (0-100)</p>
+            </div>
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Weight (grams) <span class="text-red-500">*</span></label>
+                <input type="number" step="0.001" name="amount" required placeholder="e.g., 100.500" class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-amber-500 focus:border-amber-500">
+            </div>
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-2">Stock Type <span class="text-red-500">*</span></label>
+                <select name="stock_type" required class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-amber-500 focus:border-amber-500">
+                    <option value="">Select Type</option>
                     <option value="Cash">Cash (Kachha)</option>
                     <option value="Bank">Bank (Pakka)</option>
                 </select>
+                <p class="text-xs text-gray-500 mt-1">Cash = Kachha, Bank = Pakka</p>
             </div>
             <div class="mb-4">
-                <label class="block text-[11px] font-bold text-gray-700 mb-1 uppercase tracking-tighter">Notes</label>
-                <textarea name="notes" rows="2" placeholder="Optional details..." class="w-full px-2 py-1.5 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-amber-500"></textarea>
+                <label class="block text-sm font-medium text-gray-700 mb-2">Notes</label>
+                <textarea name="notes" rows="2" placeholder="Optional notes..." class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-amber-500 focus:border-amber-500"></textarea>
             </div>
-            <input type="hidden" name="stock_id" id="addStockId">
             <div class="flex gap-2">
-                <button type="submit" class="flex-1 bg-amber-600 text-white text-[10px] font-bold uppercase py-2 rounded shadow hover:bg-amber-700 transition tracking-tighter">
-                    <i class="fas fa-plus mr-1"></i>Add Stock
+                <button type="submit" class="flex-1 bg-amber-600 text-white px-4 py-2 rounded-md hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-amber-500">
+                    <i class="fas fa-plus mr-2"></i>Add Stock
                 </button>
-                <button type="button" onclick="closeModal('addStockModal')" class="flex-1 bg-gray-100 text-gray-600 text-[10px] font-bold uppercase py-2 rounded hover:bg-gray-200 transition tracking-tighter">
+                <button type="button" onclick="closeModal('addStockModal')" class="flex-1 bg-gray-300 text-gray-700 px-4 py-2 rounded-md hover:bg-gray-400">
                     Cancel
                 </button>
             </div>
@@ -428,7 +455,6 @@ ob_start();
             </button>
         </div>
         <form id="resetStockForm" onsubmit="submitStockAction(event, 'reset_stock')">
-            <input type="hidden" id="resetStockId" name="stock_id">
             <input type="hidden" id="resetStockPurity" name="purity">
             <div class="mb-4">
                 <div class="bg-yellow-50 border border-yellow-200 rounded-md p-3 mb-3">
@@ -658,22 +684,18 @@ function openAddStockModalFree() {
     document.getElementById('addStockModal').classList.remove('hidden');
 }
 
-function openAddStockModal(stockId, stockName, purity) {
-    // Pre-fill fields when adding to existing stock
-    document.getElementById('addStockId').value = stockId;
+function openAddStockModal(purity) {
+    // Pre-fill purity when adding to existing stock
     document.getElementById('addStockPurityInput').value = purity;
-    // You might want to pre-fill stock name too if you had an input for it that wasn't readonly
-    // But typically add stock to existing implies keeping same name/purity
     document.getElementById('addStockModal').classList.remove('hidden');
-    toggleDropdown('stock-dropdown-' + stockId);
+    toggleDropdown('stock-dropdown-' + purity);
 }
 
-function openResetStockModal(stockId, stockName, purity) {
-    document.getElementById('resetStockId').value = stockId;
+function openResetStockModal(purity) {
     document.getElementById('resetStockPurity').value = purity;
-    document.getElementById('resetStockPurityDisplay').value = stockName + ' (' + purity + '%)';
+    document.getElementById('resetStockPurityDisplay').value = purity + '%';
     document.getElementById('resetStockModal').classList.remove('hidden');
-    toggleDropdown('stock-dropdown-' + stockId);
+    toggleDropdown('stock-dropdown-' + purity);
 }
 
 function openAddCashModal() {
@@ -751,7 +773,7 @@ function submitCashBankAction(event, action) {
 }
 
 // Open transactions modal and load data
-function openTransactionsModal(type, id = null) {
+function openTransactionsModal(type, purity = null) {
     const modal = document.getElementById('transactionsModal');
     const title = document.getElementById('transactionsModalTitle');
     const loading = document.getElementById('transactionsLoading');
@@ -763,7 +785,7 @@ function openTransactionsModal(type, id = null) {
     } else if (type === 'bank') {
         title.textContent = 'Bank Transaction History';
     } else if (type === 'stock') {
-        title.textContent = `Gold Stock Transaction History`;
+        title.textContent = `Gold Stock Transaction History (${purity}%)`;
     }
     
     // Show modal and loading state
@@ -779,10 +801,9 @@ function openTransactionsModal(type, id = null) {
     const formData = new FormData();
     formData.append('action', 'get_transactions');
     formData.append('type', type);
-    if (id) {
-         formData.append('stock_id', id);
+    if (purity !== null) {
+        formData.append('purity', purity);
     }
-    /* purity removed as it was undefined and not needed */
     
     fetch('handlers/manage_stock_cash.php', {
         method: 'POST',
@@ -824,26 +845,9 @@ function displayTransactions(transactions, type) {
         // Determine amount and type display
         let amount, typeDisplay, typeColor;
         if (type === 'stock') {
-            // For Exchange, we issue Fine Gold (fine_weight), so use that if available and type is Exchange
-            if (transaction.transaction_type === 'Exchange' && transaction.fine_weight > 0) {
-                 amount = parseFloat(transaction.fine_weight).toFixed(3) + ' g';
-            } else {
-                 amount = parseFloat(transaction.gold_weight).toFixed(3) + ' g';
-            }
+            amount = parseFloat(transaction.gold_weight).toFixed(3) + ' g';
             typeDisplay = transaction.transaction_type.replace('_', ' ');
-            
-            // Color logic: Additions (Green), Deductions (Red)
-            if (['Stock_Addition', 'Purchase', 'Exchange_Received', 'Received'].includes(transaction.transaction_type)) {
-                typeColor = 'text-green-600';
-            } else if (['Sale', 'Stock_Deduction', 'Issue', 'Exchange'].includes(transaction.transaction_type)) {
-                typeColor = 'text-red-600';
-            } else if (transaction.transaction_type === 'Stock_Reset') {
-                 // Reset could be either, but usually implies setting a value. Let's keep it neutral or specific
-                 typeColor = 'text-blue-600';
-            } else {
-                 // Default for unknown like 'Exchange' if not specific
-                 typeColor = 'text-gray-600';
-            }
+            typeColor = transaction.transaction_type === 'Stock_Addition' ? 'text-green-600' : 'text-red-600';
         } else {
             amount = '₹' + parseFloat(transaction.payment_amount).toLocaleString('en-IN');
             
@@ -865,10 +869,7 @@ function displayTransactions(transactions, type) {
         if (notes.trim() === '') notes = '-';
         
         row.innerHTML = `
-            <td class="px-4 py-3 text-sm text-gray-700">${dateStr}</td>
-            <td class="px-4 py-3 text-sm">
-                <span class="font-medium ${typeColor}">${typeDisplay}</span>
-                ${transaction.payment_method ? '<br><span class="text-xs text-gray-500">' + transaction.payment_method + '</span>' : ''}
+            \u003ctd class=\"px-4 py-3 text-sm text-gray-700\"\u003e${dateStr}\u003c/td\u003e
             </td>
             <td class="px-4 py-3 text-sm text-right font-medium text-gray-900">${amount}</td>
             <td class="px-4 py-3 text-sm text-gray-600 max-w-xs truncate" title="${notes}">${notes}</td>

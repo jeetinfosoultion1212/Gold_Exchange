@@ -20,7 +20,7 @@ ini_set('error_log', __DIR__ . '/php_error.log');
 
 // Load database configuration
 require_once __DIR__ . '/config/database.php';
-require_once __DIR__ . '/handlers/account_balance_helper.php';
+require_once __DIR__ . DIRECTORY_SEPARATOR . 'handlers' . DIRECTORY_SEPARATOR . 'account_balance_helper.php';
 
 if ($conn->connect_error) {
     die('Database connection failed: ' . $conn->connect_error . '. Please run setup_database.php first.');
@@ -383,10 +383,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $party_name = $conn->real_escape_string($_POST['party_name']);
                 $address = $conn->real_escape_string($_POST['address']);
                 $contact_no = $conn->real_escape_string($_POST['contact_no']);
+                $gstin = $conn->real_escape_string($_POST['gstin'] ?? 'N/A');
+                $state = $conn->real_escape_string($_POST['state'] ?? '');
+                $city = $conn->real_escape_string($_POST['city'] ?? '');
+                $bank_name = $conn->real_escape_string($_POST['bank_name'] ?? '');
+                $account_no = $conn->real_escape_string($_POST['account_no'] ?? '');
+                $ifsc_code = $conn->real_escape_string($_POST['ifsc_code'] ?? '');
                 
-                $sql = "INSERT INTO parties (company_id, party_name, address, contact_no) VALUES (?, ?, ?, ?)";
+                $cash_balance = floatval($_POST['cash_balance'] ?? 0);
+                $bank_balance = floatval($_POST['bank_balance'] ?? 0);
+                $gold_balance = floatval($_POST['gold_balance'] ?? 0);
+                
+                $sql = "INSERT INTO parties (company_id, party_name, address, contact_no, gstin, state, city, bank_name, account_no, ifsc_code, cash_balance, bank_balance, gold_balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
                 $stmt = $conn->prepare($sql);
-                $stmt->bind_param("isss", $company_id, $party_name, $address, $contact_no);
+                $stmt->bind_param("isssssssssddd", $company_id, $party_name, $address, $contact_no, $gstin, $state, $city, $bank_name, $account_no, $ifsc_code, $cash_balance, $bank_balance, $gold_balance);
                 
                 if ($stmt->execute()) {
                     $party_id = $stmt->insert_id;
@@ -511,7 +521,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     } else {
                         $update_party_sql .= ", bank_balance = bank_balance + $payment_amount";
                     }
-                    
                     $update_party_sql .= " WHERE id = $party_id AND company_id = $company_id";
                     
                     if (!$conn->query($update_party_sql)) {
@@ -581,127 +590,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     echo json_encode([
                         'status' => 'error',
                         'message' => 'Failed to fetch purchase list'
-                    ]);
-                }
-                exit;
-                
-            case 'get_purchase_details':
-                $receipt_id = $conn->real_escape_string($_POST['receipt_id'] ?? '');
-                $transaction_id = isset($_POST['transaction_id']) ? intval($_POST['transaction_id']) : 0;
-                
-                $sql = "SELECT t.*, p.party_name, p.contact_no
-                        FROM transactions t
-                        LEFT JOIN parties p ON t.party_id = p.id
-                        WHERE t.company_id = $company_id
-                        AND t.transaction_type = 'Purchase'";
-                
-                if ($transaction_id > 0) {
-                    $sql .= " AND t.id = $transaction_id";
-                } else if ($receipt_id) {
-                    $sql .= " AND t.receipt_id = '$receipt_id'";
-                } else {
-                    echo json_encode([
-                        'status' => 'error',
-                        'message' => 'Transaction ID or Receipt ID required'
-                    ]);
-                    exit;
-                }
-                
-                $sql .= " LIMIT 1";
-                $result = $conn->query($sql);
-                
-                if ($result && $result->num_rows > 0) {
-                    $transaction = $result->fetch_assoc();
-                    echo json_encode([
-                        'status' => 'success',
-                        'data' => $transaction
-                    ]);
-                } else {
-                    echo json_encode([
-                        'status' => 'error',
-                        'message' => 'Purchase transaction not found'
-                    ]);
-                }
-                exit;
-                
-            case 'delete_purchase':
-                $conn->begin_transaction();
-                try {
-                    $transaction_id = intval($_POST['transaction_id']);
-                    
-                    // Get transaction details before deleting
-                    $get_sql = "SELECT t.*, p.party_name 
-                               FROM transactions t
-                               LEFT JOIN parties p ON t.party_id = p.id
-                               WHERE t.id = $transaction_id 
-                               AND t.company_id = $company_id
-                               AND t.transaction_type = 'Purchase'";
-                    $get_result = $conn->query($get_sql);
-                    
-                    if (!$get_result || $get_result->num_rows === 0) {
-                        throw new Exception("Transaction not found");
-                    }
-                    
-                    $transaction = $get_result->fetch_assoc();
-                    $party_id = $transaction['party_id'];
-                    $gold_weight = floatval($transaction['gold_weight']);
-                    $purity = floatval($transaction['purity']);
-                    $payment_amount = floatval($transaction['payment_amount']);
-                    $payment_method = $transaction['payment_method'];
-                    $party_balance_after = floatval($transaction['party_balance_after']);
-                    $party_balance_before = floatval($transaction['party_balance_before']);
-                    
-                    // Reverse party balance (add back the payment)
-                    $balance_change = $party_balance_after - $party_balance_before;
-                    $update_party_sql = "UPDATE parties SET 
-                        current_balance = current_balance - $balance_change";
-                    
-                    if ($payment_method === 'Cash') {
-                        $update_party_sql .= ", cash_balance = cash_balance + $payment_amount";
-                    } else {
-                        $update_party_sql .= ", bank_balance = bank_balance + $payment_amount";
-                    }
-                    
-                    $update_party_sql .= " WHERE id = $party_id AND company_id = $company_id";
-                    
-                    if (!$conn->query($update_party_sql)) {
-                        throw new Exception("Error reversing party balance: " . $conn->error);
-                    }
-                    
-                    // Reverse gold stock (decrease stock)
-                    $stock_sql = "SELECT id, current_stock FROM gold_stock WHERE purity = $purity AND company_id = $company_id ORDER BY id DESC LIMIT 1";
-                    $stock_result = $conn->query($stock_sql);
-                    
-                    if ($stock_result && $stock_result->num_rows > 0) {
-                        $stock_data = $stock_result->fetch_assoc();
-                        $stock_id = $stock_data['id'];
-                        $current_stock = $stock_data['current_stock'];
-                        $new_stock = max(0, $current_stock - $gold_weight);
-                        
-                        $update_stock_sql = "UPDATE gold_stock SET current_stock = $new_stock, last_updated = NOW() WHERE id = $stock_id";
-                        if (!$conn->query($update_stock_sql)) {
-                            throw new Exception("Error reversing gold stock: " . $conn->error);
-                        }
-                    }
-                    
-                    // Delete transaction
-                    $delete_sql = "DELETE FROM transactions WHERE id = $transaction_id AND company_id = $company_id";
-                    if (!$conn->query($delete_sql)) {
-                        throw new Exception("Error deleting transaction: " . $conn->error);
-                    }
-                    
-                    $conn->commit();
-                    
-                    echo json_encode([
-                        'status' => 'success',
-                        'message' => 'Purchase transaction deleted successfully'
-                    ]);
-                    
-                } catch (Exception $e) {
-                    $conn->rollback();
-                    echo json_encode([
-                        'status' => 'error',
-                        'message' => $e->getMessage()
                     ]);
                 }
                 exit;
@@ -2078,201 +1966,23 @@ if ($total_result && $transactions) {
 
             // Function to show add party modal
             function showAddPartyModal(partyName, form) {
-                Swal.fire({
-                    title: '<div style="font-size: 18px; font-weight: 600; color: #1f2937; font-family: \'Poppins\', sans-serif;">Add New Party</div>',
-                    html: `
-                        <div style="padding: 8px;">
-                            <div style="margin-bottom: 12px;">
-                                <label style="display: block; font-size: 13px; font-weight: 500; color: #374151; margin-bottom: 4px;">Party Name *</label>
-                                <input type="text" id="newPartyName" value="${partyName || ''}" style="width: 100%; padding: 8px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 14px; outline: none; transition: border-color 0.2s;" placeholder="Enter party name" autocomplete="off">
-                            </div>
-                            <div style="margin-bottom: 12px;">
-                                <label style="display: block; font-size: 13px; font-weight: 500; color: #374151; margin-bottom: 4px;">Address</label>
-                                <textarea id="newPartyAddress" style="width: 100%; padding: 8px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 14px; outline: none; transition: border-color 0.2s; resize: vertical; min-height: 50px;" placeholder="Enter party address (optional)" autocomplete="off"></textarea>
-                            </div>
-                            <div style="margin-bottom: 12px;">
-                                <label style="display: block; font-size: 13px; font-weight: 500; color: #374151; margin-bottom: 4px;">Contact Number</label>
-                                <input type="tel" id="newPartyContact" style="width: 100%; padding: 8px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 14px; outline: none; transition: border-color 0.2s;" placeholder="Enter contact number (optional)" autocomplete="off">
-                            </div>
-                            ${partyName ? `
-                            <div style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 4px; padding: 8px; margin-bottom: 12px;">
-                                <div style="display: flex; align-items: center; gap: 6px;">
-                                    <div style="width: 16px; height: 16px; background: #3b82f6; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; font-size: 10px;">ℹ</div>
-                                    <div style="font-size: 12px; color: #1e40af;">Party "${partyName}" not found. Please fill in the details to create a new party.</div>
-                                </div>
-                            </div>
-                            ` : ''}
-                        </div>
-                    `,
-                    showCancelButton: true,
-                    confirmButtonText: 'Create Party',
-                    cancelButtonText: 'Cancel',
-                    confirmButtonColor: '#7c3aed',
-                    cancelButtonColor: '#dc2626',
-                    width: '400px',
-                    allowOutsideClick: false,
-                    allowEscapeKey: true,
-                    customClass: {
-                        popup: 'swal-popup-enhanced',
-                        title: 'swal-title-enhanced',
-                        htmlContainer: 'swal-html-enhanced',
-                        confirmButton: 'swal-btn-confirm',
-                        cancelButton: 'swal-btn-cancel'
-                    },
-                    preConfirm: () => {
-                        const name = document.getElementById('newPartyName').value.trim();
-                        const address = document.getElementById('newPartyAddress').value.trim();
-                        const contact = document.getElementById('newPartyContact').value.trim();
+                SharedPartyHandler.showAddPartyModal({
+                    onSuccess: function(response, partyData) {
+                        // Automatically select the newly created party
+                        const newParty = {
+                            id: response.party_id,
+                            party_name: partyData.party_name,
+                            address: partyData.address
+                        };
                         
-                        if (!name) {
-                            Swal.showValidationMessage('Party name is required');
-                            return false;
+                        selectParty(newParty);
+                        
+                        // If form is provided, retry form submission after party is selected
+                        if (form) {
+                            setTimeout(() => {
+                                $('#purchaseForm').trigger('submit');
+                            }, 500);
                         }
-                        
-                        return { name, address, contact };
-                    },
-                    didOpen: () => {
-                        // Focus on party name field
-                        setTimeout(() => {
-                            const nameInput = document.getElementById('newPartyName');
-                            if (nameInput) {
-                                nameInput.focus();
-                                // Move cursor to end if there's existing text
-                                if (nameInput.value) {
-                                    nameInput.setSelectionRange(nameInput.value.length, nameInput.value.length);
-                                }
-                            }
-                        }, 100);
-                        
-                        // Add input event listeners for better UX
-                        const nameInput = document.getElementById('newPartyName');
-                        const addressInput = document.getElementById('newPartyAddress');
-                        const contactInput = document.getElementById('newPartyContact');
-                        
-                        // Add focus/blur effects
-                        [nameInput, addressInput, contactInput].forEach(input => {
-                            if (input) {
-                            input.addEventListener('focus', function() {
-                                this.style.borderColor = '#7c3aed';
-                                    this.style.boxShadow = '0 0 0 2px rgba(124, 58, 237, 0.1)';
-                            });
-                            input.addEventListener('blur', function() {
-                                this.style.borderColor = '#d1d5db';
-                                    this.style.boxShadow = 'none';
-                                });
-                                
-                                // Allow Enter key to submit
-                                input.addEventListener('keydown', function(e) {
-                                    if (e.key === 'Enter' && !e.shiftKey) {
-                                        e.preventDefault();
-                                        // If in name field, move to address; if in address, move to contact; if in contact, submit
-                                        if (this === nameInput) {
-                                            addressInput.focus();
-                                        } else if (this === addressInput) {
-                                            contactInput.focus();
-                                        } else if (this === contactInput) {
-                                            // Trigger confirm button
-                                            const confirmBtn = document.querySelector('.swal2-confirm');
-                                            if (confirmBtn) {
-                                                confirmBtn.click();
-                                            }
-                                        }
-                                    }
-                                });
-                            }
-                        });
-                    }
-                }).then((result) => {
-                    if (result.isConfirmed) {
-                        const { name, address, contact } = result.value;
-                        
-                        // Show loading
-                        Swal.fire({
-                            title: 'Creating Party...',
-                            text: 'Please wait while we create the new party',
-                            allowOutsideClick: false,
-                            showConfirmButton: false,
-                            didOpen: () => {
-                                Swal.showLoading();
-                            }
-                        });
-                        
-                        // Create new party
-                        fetch('', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/x-www-form-urlencoded',
-                            },
-                            body: `action=save_party&party_name=${encodeURIComponent(name)}&address=${encodeURIComponent(address)}&contact_no=${encodeURIComponent(contact)}`
-                        })
-                        .then(response => response.json())
-                        .then(result => {
-                            if (result.status === 'success') {
-                                // Automatically select the newly created party
-                                const newParty = {
-                                    id: result.party_id,
-                                    party_name: name,
-                                    address: address
-                                };
-                                
-                                // Ensure party_id is set before selecting
-                                if (newParty.id) {
-                                    selectParty(newParty);
-                                    
-                                    // Show success message briefly, then submit form
-                                    Swal.fire({
-                                        icon: 'success',
-                                        title: 'Party Created!',
-                                        text: `Party "${name}" has been created successfully.`,
-                                        confirmButtonColor: '#7c3aed',
-                                        timer: 1500,
-                                        showConfirmButton: false
-                                    });
-                                    
-                                    // If form is provided, retry form submission after party is selected
-                                    if (form) {
-                                        // Wait a bit to ensure party ID is set in the form
-                                        setTimeout(() => {
-                                            // Verify party ID is set before submitting
-                                            const currentPartyId = $('#partyId').val();
-                                            if (currentPartyId && currentPartyId === String(newParty.id)) {
-                                                // Trigger form submission
-                                                $('#purchaseForm').trigger('submit');
-                                            } else {
-                                                // If party ID not set, try again after a short delay
-                                                console.warn('Party ID not set, retrying...');
-                                                setTimeout(() => {
-                                                    $('#purchaseForm').trigger('submit');
-                                                }, 500);
-                                            }
-                                        }, 1600);
-                                    }
-                                } else {
-                                    Swal.fire({
-                                        icon: 'error',
-                                        title: 'Error',
-                                        text: 'Party created but ID not returned. Please refresh and try again.',
-                                        confirmButtonColor: '#dc2626'
-                                    });
-                                }
-                            } else {
-                                Swal.fire({
-                                    icon: 'error',
-                                    title: 'Error',
-                                    text: result.message || 'Failed to create party',
-                                    confirmButtonColor: '#dc2626'
-                                });
-                            }
-                        })
-                        .catch(error => {
-                            console.error('Error creating party:', error);
-                            Swal.fire({
-                                icon: 'error',
-                                title: 'Error',
-                                text: 'Failed to create party. Please try again.',
-                                confirmButtonColor: '#dc2626'
-                            });
-                        });
                     }
                 });
             }

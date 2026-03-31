@@ -20,21 +20,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $company_name = $conn->real_escape_string($_POST['company_name']);
     $company_address = $conn->real_escape_string($_POST['company_address']);
     $company_contact = $conn->real_escape_string($_POST['company_contact']);
-    $company_email = $conn->real_escape_string($_POST['company_email']);
+    $company_email = $conn->real_escape_string($_POST['company_email'] ?? '');
     
-    $username = $conn->real_escape_string($_POST['username']);
-    $email = $conn->real_escape_string($_POST['email']);
+    $username = $company_contact; // Use contact as username
+    $email_to_save = !empty($company_email) ? $company_email : null; // Use single email for both company and admin login
+    
     $password = $_POST['password'];
     $confirm_password = $_POST['confirm_password'];
     $full_name = $conn->real_escape_string($_POST['full_name']);
+    $pin = $conn->real_escape_string($_POST['pin'] ?? '');
     
     // Validation - Only require minimum details
-    if (empty($company_name) || empty($username) || empty($password) || empty($full_name)) {
+    if (empty($company_name) || empty($company_contact) || empty($password) || empty($full_name) || empty($pin)) {
         $error = "Please fill in all required fields";
     } elseif ($password !== $confirm_password) {
         $error = "Passwords do not match";
     } elseif (strlen($password) < 6) {
         $error = "Password must be at least 6 characters long";
+    } elseif (strlen($pin) < 4) {
+        $error = "PIN must be at least 4 characters long";
     } else {
         // Check if company name already exists
         $check_company = "SELECT id FROM companies WHERE company_name = ?";
@@ -50,13 +54,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmt->bind_param("s", $username);
             $stmt->execute();
             if ($stmt->get_result()->num_rows > 0) {
-                $error = "Username already exists";
+                $error = "Mobile Number (User) already exists";
             } else {
                 // Check if email already exists (only if email is provided)
-                if (!empty($email)) {
+                if (!empty($email_to_save)) {
                     $check_email = "SELECT id FROM users WHERE email = ?";
                     $stmt = $conn->prepare($check_email);
-                    $stmt->bind_param("s", $email);
+                    $stmt->bind_param("s", $email_to_save);
                     $stmt->execute();
                     if ($stmt->get_result()->num_rows > 0) {
                         $error = "Email already exists";
@@ -65,10 +69,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $conn->begin_transaction();
                         try {
                             // Insert company
-                            $company_sql = "INSERT INTO companies (company_name, company_address, company_contact, company_email) 
-                                           VALUES (?, ?, ?, ?)";
+                            $company_sql = "INSERT INTO companies (company_name, company_address, company_contact, company_email, pin) 
+                                           VALUES (?, ?, ?, ?, ?)";
                             $company_stmt = $conn->prepare($company_sql);
-                            $company_stmt->bind_param("ssss", $company_name, $company_address, $company_contact, $company_email);
+                            $company_stmt->bind_param("sssss", $company_name, $company_address, $company_contact, $company_email, $pin);
                             $company_stmt->execute();
                             $company_id = $conn->insert_id;
                             
@@ -79,7 +83,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $user_sql = "INSERT INTO users (company_id, username, email, password, full_name, role) 
                                         VALUES (?, ?, ?, ?, ?, 'Admin')";
                             $user_stmt = $conn->prepare($user_sql);
-                            $user_stmt->bind_param("issss", $company_id, $username, $email, $hashed_password, $full_name);
+                            $user_stmt->bind_param("issss", $company_id, $username, $email_to_save, $hashed_password, $full_name);
                             $user_stmt->execute();
                             
                             // Insert initial gold stock
@@ -127,10 +131,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $conn->begin_transaction();
                     try {
                         // Insert company
-                        $company_sql = "INSERT INTO companies (company_name, company_address, company_contact, company_email) 
-                                       VALUES (?, ?, ?, ?)";
+                        $company_sql = "INSERT INTO companies (company_name, company_address, company_contact, company_email, pin) 
+                                       VALUES (?, ?, ?, ?, ?)";
                         $company_stmt = $conn->prepare($company_sql);
-                        $company_stmt->bind_param("ssss", $company_name, $company_address, $company_contact, $company_email);
+                        $company_stmt->bind_param("sssss", $company_name, $company_address, $company_contact, $company_email, $pin);
                         $company_stmt->execute();
                         $company_id = $conn->insert_id;
                         
@@ -141,7 +145,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $user_sql = "INSERT INTO users (company_id, username, email, password, full_name, role) 
                                     VALUES (?, ?, ?, ?, ?, 'Admin')";
                         $user_stmt = $conn->prepare($user_sql);
-                        $user_stmt->bind_param("issss", $company_id, $username, $email, $hashed_password, $full_name);
+                        $user_stmt->bind_param("issss", $company_id, $username, $email_to_save, $hashed_password, $full_name);
                         $user_stmt->execute();
                         
                         // Insert initial gold stock
@@ -517,10 +521,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             </div>
                             
                             <div class="form-group">
-                                <label for="company_email" class="form-label">Company Email (Optional)</label>
+                                <label for="company_email" class="form-label">Company / Admin Email (Optional, used for login)</label>
                                 <div class="input-wrapper">
                                     <i class="fas fa-envelope input-icon"></i>
-                                    <input type="email" class="form-control" id="company_email" name="company_email" placeholder="Enter company email (optional)">
+                                    <input type="email" class="form-control" id="company_email" name="company_email" placeholder="Enter email address (optional)">
                                 </div>
                             </div>
                         </div>
@@ -539,22 +543,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             </div>
                             
                             <div class="form-group">
-                                <label for="username" class="form-label required">Username</label>
-                                <div class="input-wrapper">
-                                    <i class="fas fa-at input-icon"></i>
-                                    <input type="text" class="form-control" id="username" name="username" placeholder="Enter username" required>
-                                </div>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label for="email" class="form-label">Email Address (Optional)</label>
-                                <div class="input-wrapper">
-                                    <i class="fas fa-envelope input-icon"></i>
-                                    <input type="email" class="form-control" id="email" name="email" placeholder="Enter email address (optional)">
-                                </div>
-                            </div>
-                            
-                            <div class="form-group">
                                 <label for="password" class="form-label required">Password</label>
                                 <div class="input-wrapper">
                                     <i class="fas fa-lock input-icon"></i>
@@ -567,6 +555,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 <div class="input-wrapper">
                                     <i class="fas fa-lock input-icon"></i>
                                     <input type="password" class="form-control" id="confirm_password" name="confirm_password" placeholder="Confirm password" required>
+                                </div>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="pin" class="form-label required">Login PIN (For quick access)</label>
+                                <div class="input-wrapper">
+                                    <i class="fas fa-key input-icon"></i>
+                                    <input type="password" class="form-control" id="pin" name="pin" placeholder="Enter 4-6 digit PIN" pattern="\d{4,6}" title="Please enter 4 to 6 digit PIN" required>
                                 </div>
                             </div>
                         </div>

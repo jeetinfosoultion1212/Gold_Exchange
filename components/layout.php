@@ -240,6 +240,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
     
     <!-- Additional scripts will be included here -->
+    <script src="js/shared-party-handler.js"></script>
     <?php if (isset($additional_scripts)): ?>
         <?= $additional_scripts ?>
     <?php endif; ?>

@@ -36,309 +36,169 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $receipt_id = $conn->real_escape_string($_POST['receipt_id']);
         $party_id = intval($_POST['party_id']);
         $date_of_transaction = $conn->real_escape_string($_POST['date_of_transaction']);
-        // Accept both 'sell_weight' and 'weight' field names
-        $sell_weight = floatval($_POST['sell_weight'] ?? $_POST['weight'] ?? 0);
+        $sell_weight = floatval($_POST['sell_weight'] ?? 0);
         $purity = floatval($_POST['purity']);
         $rate = floatval($_POST['rate']);
-        // Remove commas and parse amount (handles Indian number format)
         $amount = floatval(str_replace(',', '', $_POST['amount']));
+        
+        // Mode and Taxes
+        $mode = $conn->real_escape_string($_POST['mode'] ?? 'Cash');
+        $taxable_amount = floatval($_POST['taxable_amount'] ?? 0);
+        $cgst = floatval($_POST['cgst'] ?? 0);
+        $sgst = floatval($_POST['sgst'] ?? 0);
+        $igst = floatval($_POST['igst'] ?? 0);
+        $total_gst = floatval($_POST['total_gst'] ?? 0);
+        
         $additional_cash = floatval($_POST['additional_cash'] ?? 0);
         $additional_bank = floatval($_POST['additional_bank'] ?? 0);
         $bank_payment_type = $conn->real_escape_string($_POST['bank_payment_type'] ?? $_POST['payment_method'] ?? '');
         $narration = $conn->real_escape_string($_POST['narration'] ?? '');
         
+        // Multi-item Support
+        $sell_items_json = $_POST['sell_items'] ?? '[]';
+        $sell_items = json_decode($sell_items_json, true);
+
         // Get payment_type and convert to proper case for booking_type column
         $payment_type = strtolower($_POST['payment_type'] ?? 'bank');
         $booking_type = ucfirst($payment_type); // Convert 'cash' to 'Cash', 'bank' to 'Bank'
         
         // Validate required fields
-        if (empty($receipt_id) || empty($party_id) || $sell_weight <= 0 || $rate < 0) {
-            throw new Exception("Please fill all required fields with valid values");
+        if (empty($receipt_id) || empty($party_id) || empty($sell_items)) {
+            throw new Exception("Please fill all required fields and add at least one item.");
         }
         
-        // Check company gold stock availability (but don't block the sale)
-        $stock_check = "SELECT id, current_stock FROM gold_stock WHERE purity = $purity AND company_id = $company_id ORDER BY id DESC LIMIT 1";
-        $stock_result = $conn->query($stock_check);
-        
-        if (!$stock_result) {
-            // Log the error but don't block the sale
-            error_log("Error checking company gold stock for purity $purity, company $company_id");
-            $stock_data = null;
-            $company_stock = 0;
-        } else {
-            $stock_data = $stock_result->fetch_assoc();
-            $company_stock = $stock_data ? $stock_data['current_stock'] : 0;
+        // Fetch Party Data
+        $party_sql = "SELECT (cash_balance + bank_balance) as current_balance, cash_balance, bank_balance, gold_balance FROM parties WHERE id = $party_id AND company_id = $company_id";
+        $party_result = $conn->query($party_sql);
+        if (!$party_result || $party_result->num_rows == 0) {
+             throw new Exception("Party not found");
         }
+        $balance_data = $party_result->fetch_assoc();
         
-        // Log stock warning but don't block the sale
-        if ($sell_weight > $company_stock) {
-            error_log("WARNING: Insufficient company stock. Available: {$company_stock}g, Requested: {$sell_weight}g. Sale proceeding anyway.");
-            // Don't throw exception - just log the warning and proceed
-        }
+        $available_gold = $balance_data['gold_balance'];
+        $payment_amount = $additional_cash + $additional_bank;
+        $payment_method = $conn->real_escape_string($_POST['payment_method'] ?? 'Cash');
         
-        // Check party balance by booking_type (Cash or Bank)
-        $balance_check = "SELECT 
-            COALESCE(SUM(CASE WHEN transaction_type = 'Booking' AND booking_type = '$booking_type' THEN gold_weight ELSE 0 END), 0) as booked_weight_by_type,
-            COALESCE(SUM(CASE WHEN transaction_type = 'Sale' AND booking_type = '$booking_type' THEN gold_weight ELSE 0 END), 0) as sold_weight_by_type,
-            COALESCE(SUM(CASE WHEN transaction_type = 'Booking' THEN gold_weight ELSE 0 END), 0) as total_booked_weight,
-            COALESCE(SUM(CASE WHEN transaction_type = 'Sale' THEN gold_weight ELSE 0 END), 0) as total_sold_weight,
-            COALESCE(SUM(CASE WHEN transaction_type = 'Booking' THEN gold_amount ELSE 0 END), 0) as booked_amount,
-            COALESCE(SUM(CASE WHEN transaction_type = 'Payment' AND payment_type = 'Payment_In' THEN payment_amount ELSE 0 END), 0) as advance_received
-            FROM transactions 
-            WHERE party_id = $party_id AND company_id = $company_id";
-        
-        $balance_result = $conn->query($balance_check);
-        if (!$balance_result) {
-            throw new Exception("Error checking party balance");
-        }
-        
-        $balance_data = $balance_result->fetch_assoc();
-        
-        // Calculate available weight for the specific booking_type
-        $available_weight_by_type = $balance_data['booked_weight_by_type'] - $balance_data['sold_weight_by_type'];
-        $total_available_weight = $balance_data['total_booked_weight'] - $balance_data['total_sold_weight'];
-        $advance_received = $balance_data['advance_received'];
-        
-        // Log warning if selling more than available for this booking type, but allow the sale
-        if ($balance_data['booked_weight_by_type'] > 0 && $sell_weight > $available_weight_by_type) {
-            error_log("WARNING: Selling more than available $booking_type booking. Available: {$available_weight_by_type}g, Selling: {$sell_weight}g. Sale proceeding anyway.");
-        }
-        
-        // If no booking exists for this type, set available_weight to sell_weight for calculations
-        if ($balance_data['booked_weight_by_type'] == 0) {
-            // Direct sale without booking - set previous balance to sell_weight
-            $available_weight_by_type = $sell_weight;
-        }
-        
-        // Use type-specific available weight for balance tracking
-        $available_weight = $available_weight_by_type;
-        
-        // Insert main sale transaction
-        $sale_sql = "INSERT INTO transactions (
-            company_id, party_id, receipt_id, transaction_type, date_of_transaction,
-            gold_weight, purity, rate, gold_amount, payment_amount, payment_method, payment_type, booking_type,
+        // Conditional Payment Info
+        $pay_meth_val = ($payment_amount > 0) ? $payment_method : null;
+        $pay_type_val = ($payment_amount > 0) ? 'Payment_In' : null;
+        $rcpt_meth_val = ($payment_amount > 0) ? $payment_method : null;
+        $gold_val_calc = $sell_weight * $rate;
+        $payment_status = ($payment_amount >= $amount) ? 'Paid' : (($payment_amount > 0) ? 'Partial' : 'Due');
+        $bal_before = floatval($balance_data['current_balance']);
+        $bal_after = $bal_before - $amount;
+        $gold_bal_before = floatval($balance_data['gold_balance']);
+        $gold_bal_after = $gold_bal_before - $sell_weight;
+
+        // Insert sale using prepared statement for safety and correct column index
+        $sql = "INSERT INTO transactions (
+            company_id, user_id, party_id, receipt_id, transaction_type, date_of_transaction,
+            gold_weight, purity, rate, gold_amount, payment_amount, payment_method, payment_type, 
+            receipt_method, mode, amount, taxable_amount, cgst, sgst, igst, total_gst,
             party_balance_before, party_balance_after, party_gold_balance_before, party_gold_balance_after,
-            narration
-        ) VALUES (
-            $company_id, $party_id, '$receipt_id', 'Sale', '$date_of_transaction',
-            $sell_weight, $purity, $rate, $amount, 0, 'Sale', 'Payment_Out', '$booking_type',
-            -$advance_received, -$advance_received - $amount, $available_weight, " . ($available_weight - $sell_weight) . ",
-            'Gold sale transaction - $receipt_id" . (!empty($narration) ? " - $narration" : "") . "'
-        )";
+            narration, booking_type, payment_status, created_by
+        ) VALUES (?, ?, ?, ?, 'Sale', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+        $stmt = $conn->prepare($sql);
+        // Types: 
+        // 1-5: iiiss (comp, user, party, receipt, date)
+        // 6-10: ddddd (weight, pur, rate, gold_val, pay_amt)
+        // 11-15: sssss (pay_meth, pay_type, rcpt_meth, mode, narration) NO! narration is 26th
+        // 11-14: ssss (pay_meth, pay_type, rcpt_meth, mode)
+        // 15-20: dddddd (amount, taxable, cgst, sgst, igst, tot_gst)
+        // 21-24: dddd (bal_bef, bal_aft, gold_bef, gold_aft)
+        // 25-27: sss (narration, book_type, status)
+        // 28: i (user_id)
+        $stmt->bind_param(
+            "iiissdddddssssddddddddddsssi",
+            $company_id, $user_id, $party_id, $receipt_id, $date_of_transaction,
+            $sell_weight, $purity, $rate, $gold_val_calc, $payment_amount, 
+            $pay_meth_val, $pay_type_val, $rcpt_meth_val, $mode, $amount,
+            $taxable_amount, $cgst, $sgst, $igst, $total_gst,
+            $bal_before, $bal_after, $gold_bal_before, $gold_bal_after,
+            $narration, $booking_type, $payment_status, $user_id
+        );
         
-        if (!$conn->query($sale_sql)) {
-            throw new Exception("Error creating sale transaction: " . $conn->error);
+        if (!$stmt->execute()) {
+            throw new Exception("Error creating sale transaction: " . $stmt->error);
         }
         
-        $sale_transaction_id = $conn->insert_id;
+        $sale_id = $stmt->insert_id;
         
-        // Calculate total payment received
-        // For advance payments, we need to check if party has credit (positive balance)
-        // Advance credit means we owe them money, so it reduces the sale amount they need to pay
+        // Save Multi-items and Deduct Stock
+        foreach ($sell_items as $item) {
+            $wt = floatval($item['weight']);
+            $pur = floatval($item['purity']);
+            $fn = floatval($item['fine']);
+            $sn = $conn->real_escape_string($item['stock_name'] ?? '');
+            $i_rate = floatval($item['rate'] ?? $rate);
+            $i_amt = round($wt * $i_rate);
+            
+            $item_sql = "INSERT INTO gold_sale_items (
+                company_id, transaction_id, receipt_id, stock_name, gold_weight, purity, fine_weight, rate, amount
+            ) VALUES (
+                $company_id, $sale_id, '$receipt_id', '$sn', $wt, $pur, $fn, $i_rate, $i_amt
+            )";
+            $conn->query($item_sql);
+            
+            // DEDUCT STOCK: Look for specific stock name first, then by purity
+            $where = !empty($sn) ? "stock_name = '$sn' AND purity = $pur" : "purity = $pur";
+            $stock_update = "UPDATE gold_stock SET current_stock = current_stock - $wt, last_updated = NOW() 
+                            WHERE $where AND company_id = $company_id LIMIT 1";
+            
+            if (!$conn->query($stock_update) || $conn->affected_rows == 0) {
+                // FALLBACK: If specific stock name not found or doesn't match name, use purity only
+                $conn->query("UPDATE gold_stock SET current_stock = current_stock - $wt, last_updated = NOW() 
+                              WHERE purity = $pur AND company_id = $company_id LIMIT 1");
+            }
+        }
+        
+        // Calculate settlement
+        $advance_received = 0; // Column not in parties table currently
         $advance_settlement = min($advance_received, $amount);
         $total_payment_received = $advance_settlement + $additional_cash + $additional_bank;
         
-        // Log advance settlement for debugging
-        error_log("Sale calculation - Sale amount: {$amount}, Advance received: {$advance_received}, Advance settlement: {$advance_settlement}, Additional payments: " . ($additional_cash + $additional_bank));
+        // Update main transaction payment info
+        $conn->query("UPDATE transactions SET payment_amount = $total_payment_received WHERE id = $sale_id");
         
-        // Update the main sale transaction with correct payment amount
-        $update_payment_sql = "UPDATE transactions SET payment_amount = $total_payment_received WHERE id = $sale_transaction_id";
-        $conn->query($update_payment_sql);
+        // Handle settlement entries (Advance, Cash, Bank)
+        // Note: advance_received is not in parties table, so we omit advance_settlement for now
         
-        // Handle advance settlement (if any)
-        if ($advance_settlement > 0) {
-            $advance_receipt_id = 'ADV-' . date('Ymd') . '-' . str_pad(rand(1, 9999), 4, '0', STR_PAD_LEFT);
-            $advance_sql = "INSERT INTO transactions (
-                company_id, party_id, receipt_id, transaction_type, date_of_transaction,
-                gold_weight, purity, rate, gold_amount, payment_amount, payment_method, payment_type, booking_type,
-                party_balance_before, party_balance_after, party_gold_balance_before, party_gold_balance_after,
-                narration
-            ) VALUES (
-                $company_id, $party_id, '$advance_receipt_id', 'Advance_Settlement', '$date_of_transaction',
-                0.000, 0.00, 0.00, 0.00, $advance_settlement, 'Advance', 'Payment_Out', '$booking_type',
-                -$advance_received, -" . ($advance_received - $advance_settlement) . ", $available_weight, $available_weight,
-                'Advance settlement for sale $receipt_id'
-            )";
-            
-            if (!$conn->query($advance_sql)) {
-                throw new Exception("Error creating advance settlement: " . $conn->error);
-            }
-        }
-        
-        // Handle additional cash received (if any)
         if ($additional_cash > 0) {
-            $cash_receipt_id = 'CSH-' . date('Ymd') . '-' . str_pad(rand(1, 9999), 4, '0', STR_PAD_LEFT);
-            $cash_sql = "INSERT INTO transactions (
-                company_id, party_id, receipt_id, transaction_type, date_of_transaction,
-                gold_weight, purity, rate, gold_amount, payment_amount, payment_method, payment_type, booking_type,
-                party_balance_before, party_balance_after, party_gold_balance_before, party_gold_balance_after,
-                narration
-            ) VALUES (
-                $company_id, $party_id, '$cash_receipt_id', 'Received', '$date_of_transaction',
-                0.000, 0.00, 0.00, 0.00, $additional_cash, 'Cash', 'Payment_In', 'Cash',
-                -" . ($advance_received - $advance_settlement) . ", -" . ($advance_received - $advance_settlement + $additional_cash) . ", " . ($available_weight - $sell_weight) . ", " . ($available_weight - $sell_weight) . ",
-                'Cash received for sale $receipt_id'
-            )";
-            
-            if (!$conn->query($cash_sql)) {
-                throw new Exception("Error creating cash received transaction: " . $conn->error);
-            }
-            
-            // Update company cash balance
-            if (!updateAccountBalance($conn, $company_id, 'Cash', $additional_cash)) {
-                error_log("Failed to update company cash balance for sale $receipt_id");
-            }
+            $csh_id = 'CSH-' . date('Ymd') . '-' . rand(1000, 9999);
+            $conn->query("INSERT INTO transactions (company_id, party_id, receipt_id, transaction_type, date_of_transaction, payment_amount, payment_method, payment_type, booking_type, narration)
+                         VALUES ($company_id, $party_id, '$csh_id', 'Received', '$date_of_transaction', $additional_cash, 'Cash', 'Payment_In', 'Cash', 'Cash for sale $receipt_id')");
+            updateAccountBalance($conn, $company_id, 'Cash', $additional_cash);
         }
         
-        // Handle additional bank received (if any)
         if ($additional_bank > 0) {
-            $bank_receipt_id = 'BNK-' . date('Ymd') . '-' . str_pad(rand(1, 9999), 4, '0', STR_PAD_LEFT);
-            // All bank payments now use simplified 'Bank' method
-            $bank_narration = 'Bank received for sale ' . $receipt_id;
-            if (!empty($bank_payment_type)) {
-                $bank_narration .= ' via ' . $bank_payment_type;
-            }
-            
-            $bank_sql = "INSERT INTO transactions (
-                company_id, party_id, receipt_id, transaction_type, date_of_transaction,
-                gold_weight, purity, rate, gold_amount, payment_amount, payment_method, payment_type, booking_type,
-                party_balance_before, party_balance_after, party_gold_balance_before, party_gold_balance_after,
-                narration
-            ) VALUES (
-                $company_id, $party_id, '$bank_receipt_id', 'Received', '$date_of_transaction',
-                0.000, 0.00, 0.00, 0.00, $additional_bank, 'Bank', 'Payment_In', 'Bank',
-                -" . ($advance_received - $advance_settlement + $additional_cash) . ", -" . ($advance_received - $advance_settlement + $additional_cash + $additional_bank) . ", " . ($available_weight - $sell_weight) . ", " . ($available_weight - $sell_weight) . ",
-                '$bank_narration'
-            )";
-            
-            if (!$conn->query($bank_sql)) {
-                throw new Exception("Error creating bank received transaction: " . $conn->error);
-            }
-            
-            // Update company bank balance
-            if (!updateAccountBalance($conn, $company_id, 'Bank', $additional_bank)) {
-                error_log("Failed to update company bank balance for sale $receipt_id");
-                // We don't block the transaction for this, but logging is important
-            }
+            $bnk_id = 'BNK-' . date('Ymd') . '-' . rand(1000, 9999);
+            $conn->query("INSERT INTO transactions (company_id, party_id, receipt_id, transaction_type, date_of_transaction, payment_amount, payment_method, payment_type, booking_type, narration)
+                         VALUES ($company_id, $party_id, '$bnk_id', 'Received', '$date_of_transaction', $additional_bank, 'Bank', 'Payment_In', 'Bank', 'Bank for sale $receipt_id')");
+            updateAccountBalance($conn, $company_id, 'Bank', $additional_bank);
         }
         
-        // Update gold stock (decrease company stock when selling)
-        try {
-            if ($stock_data && $stock_data['id']) {
-                $stock_id = $stock_data['id'];
-                $current_stock = $stock_data['current_stock'];
-                $new_stock = $current_stock - $sell_weight;
-                
-                // Allow negative stock for tracking purposes
-                $update_stock_sql = "UPDATE gold_stock SET current_stock = $new_stock, last_updated = NOW() WHERE id = $stock_id";
-                if (!$conn->query($update_stock_sql)) {
-                    error_log("Error updating gold stock: " . $conn->error);
-                    // Don't throw exception - just log the error
-                } else {
-                    error_log("Stock updated successfully: ID $stock_id, Old: {$current_stock}g, New: {$new_stock}g, Sold: {$sell_weight}g");
-                }
-            } else {
-                // If no stock record exists, create one with negative stock
-                $insert_stock_sql = "INSERT INTO gold_stock (company_id, purity, current_stock, last_updated) VALUES ($company_id, $purity, -$sell_weight, NOW())";
-                if (!$conn->query($insert_stock_sql)) {
-                    error_log("Error creating gold stock record: " . $conn->error);
-                    // Don't throw exception - just log the error
-                } else {
-                    error_log("New stock record created: Company $company_id, Purity $purity, Stock: -{$sell_weight}g");
-                }
-            }
-        } catch (Exception $e) {
-            // Log stock update error but don't block the sale
-            error_log("Stock update failed but sale proceeding: " . $e->getMessage());
-        }
-        
-        // Update party balances - separate cash and bank tracking
-        // Sale means party is selling gold back to us, so we owe them money
-        // Additional payments they make reduce their debt to us
-        
-        if ($booking_type == 'Cash') {
-            // Cash booking: party gets cash for their gold (we owe them)
-            // But if they make additional payments, it reduces their debt to us
-            $cash_balance_change = $amount; // We owe them cash for the gold
-            $cash_balance_change -= $advance_settlement; // Less any advance they already gave
-            $cash_balance_change -= $additional_cash; // Less additional cash payment they made
-            $bank_balance_change = -$additional_bank; // Additional bank payment reduces their debt
-        } else {
-            // Bank booking: party gets bank payment for their gold (we owe them)
-            // But if they make additional payments, it reduces their debt to us
-            $bank_balance_change = $amount; // We owe them bank payment for the gold
-            $bank_balance_change -= $advance_settlement; // Less any advance they already gave
-            $bank_balance_change -= $additional_bank; // Less additional bank payment they made
-            $cash_balance_change = -$additional_cash; // Additional cash payment reduces their debt
-        }
-        
-        $update_party_balance = "UPDATE parties SET 
-            current_gold_balance = current_gold_balance - $sell_weight,
-            cash_balance = cash_balance + ($cash_balance_change),
-            bank_balance = bank_balance + ($bank_balance_change)
-            WHERE id = $party_id";
-        
-        if (!$conn->query($update_party_balance)) {
-            throw new Exception("Error updating party balance: " . $conn->error);
-        }
-        
-        // Update current_balance as sum of the updated cash and bank balances
-        $update_current_balance = "UPDATE parties SET 
-            current_balance = cash_balance + bank_balance
-            WHERE id = $party_id";
-        
-        if (!$conn->query($update_current_balance)) {
-            throw new Exception("Error updating current balance: " . $conn->error);
-        }
-        
-        // Get party details for response
-        $party_sql = "SELECT party_name, contact_no FROM parties WHERE id = $party_id";
-        $party_result = $conn->query($party_sql);
-        $party_data = $party_result->fetch_assoc();
-        
+        // Update Party Final Balances
+        // Use $mode to decide which balance column to update
+        $c_change = ($mode == 'Cash' ? $amount : 0) - $additional_cash;
+        $b_change = ($mode == 'Bank' ? $amount : 0) - $additional_bank;
+
+        $conn->query("UPDATE parties SET 
+            gold_balance = gold_balance - $sell_weight,
+            cash_balance = cash_balance + $c_change,
+            bank_balance = bank_balance + $b_change
+            WHERE id = $party_id");
+
         $conn->commit();
-        
-        // Get updated stock information for response
-        $final_stock_check = "SELECT current_stock FROM gold_stock WHERE purity = $purity AND company_id = $company_id ORDER BY id DESC LIMIT 1";
-        $final_stock_result = $conn->query($final_stock_check);
-        $final_stock = 0;
-        if ($final_stock_result && $final_stock_result->num_rows > 0) {
-            $final_stock_data = $final_stock_result->fetch_assoc();
-            $final_stock = $final_stock_data['current_stock'];
-        }
-        
-        // Return success response
         header('Content-Type: application/json');
-        echo json_encode([
-            'status' => 'success',
-            'message' => 'Gold sale completed successfully',
-            'data' => [
-                'receipt_id' => $receipt_id,
-                'party_name' => $party_data['party_name'],
-                'party_contact' => $party_data['contact_no'],
-                'date_of_transaction' => $date_of_transaction,
-                'sell_weight' => $sell_weight,
-                'purity' => $purity,
-                'rate' => $rate,
-                'amount' => $amount,
-                'advance_settlement' => $advance_settlement,
-                'additional_cash' => $additional_cash,
-                'additional_bank' => $additional_bank,
-                'final_settlement' => $amount - $advance_settlement + $additional_cash + $additional_bank,
-                'remaining_gold' => $available_weight - $sell_weight,
-                'stock_before' => $company_stock,
-                'stock_after' => $final_stock,
-                'stock_warning' => $sell_weight > $company_stock ? "Sale completed with insufficient stock. Please add stock soon." : null
-            ]
-        ]);
+        echo json_encode(['status' => 'success', 'message' => 'Sale saved successfully', 'data' => ['receipt_id' => $receipt_id]]);
+        exit;
         
     } catch (Exception $e) {
         $conn->rollback();
         header('Content-Type: application/json');
-        echo json_encode([
-            'status' => 'error',
-            'message' => $e->getMessage()
-        ]);
+        echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
+        exit;
     }
 } else {
     header('Content-Type: application/json');
@@ -346,5 +206,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         'status' => 'error',
         'message' => 'Invalid request'
     ]);
+    exit;
 }
 ?>

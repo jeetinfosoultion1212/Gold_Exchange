@@ -963,57 +963,16 @@ const PartySearch = (() => {
     }
 
     function showAddPartyModal() {
-        if (!window.Swal) return alert('Party add modal not supported.');
-        Swal.fire({
-            title: 'Add New Party',
-            html: `<input id="newPartyName" class="swal2-input" placeholder="Party Name">
-                   <input id="newPartyAddr" class="swal2-input" placeholder="Address">
-                   <input id="newPartyContact" class="swal2-input" placeholder="Contact">
-                  `,
-            confirmButtonText: 'Save',
-            preConfirm: () => {
-                const party_name = document.getElementById('newPartyName').value.trim();
-                const address = document.getElementById('newPartyAddr').value.trim();
-                const contact = document.getElementById('newPartyContact').value.trim();
-                if (!party_name) {
-                    Swal.showValidationMessage('Party name required');
-                    return false;
-                }
-                return { party_name, address, contact };
-            }
-        }).then((result) => {
-            if (result.isConfirmed) saveParty(result.value);
-        });
-    }
-
-    function saveParty({ party_name, address, contact }) {
-        console.log('[PartySearch] saveParty called with:', { party_name, address, contact });
-        console.log('[PartySearch] input element:', input);
-        console.log('[PartySearch] idField element:', idField);
-        console.log('[PartySearch] idField current value before save:', idField ? idField.value : 'idField is null');
-        
-        Utils.post('save_party', { party_name, address, contact_no: contact })
-        .then(r => {
-            console.log('[PartySearch] save_party response:', r);
-            if (r.status === 'success' && r.party_id) {
-                console.log('[PartySearch] Party saved successfully, party_id:', r.party_id);
-                
-                // Set both party name and party_id
+        SharedPartyHandler.showAddPartyModal({
+            apiPath: 'book.php',
+            onSuccess: function(response, partyData) {
                 if (input) {
-                    input.value = party_name;
-                    lastSelectedPartyName = party_name; // Track selected party name
-                    console.log('[PartySearch] Set input.value to:', party_name);
-                    console.log('[PartySearch] Tracked lastSelectedPartyName:', lastSelectedPartyName);
-                } else {
-                    console.error('[PartySearch] ERROR: input element is null!');
+                    input.value = partyData.party_name;
+                    lastSelectedPartyName = partyData.party_name;
                 }
                 
                 if (idField) {
-                    idField.value = r.party_id;
-                    console.log('[PartySearch] Set idField.value to:', r.party_id);
-                    console.log('[PartySearch] Verified idField.value after setting:', idField.value);
-                } else {
-                    console.error('[PartySearch] ERROR: idField element is null!');
+                    idField.value = response.party_id;
                 }
                 
                 // Visual feedback
@@ -1022,31 +981,13 @@ const PartySearch = (() => {
                     setTimeout(() => input.classList.remove('border-green-500'), 2000);
                 }
                 
-                // Hide dropdown if open
                 hideDropdown();
                 
-                Swal.fire({
-                    icon: 'success',
-                    title: 'Saved!',
-                    text: 'Party added and selected.',
-                    timer: 1500,
-                    showConfirmButton: false
-                });
-                
-                // Focus back on party field after modal closes
+                // Focus back on party field
                 setTimeout(() => {
-                    if (input) {
-                        input.focus();
-                        console.log('[PartySearch] Refocused on party input field');
-                    }
-                }, 1600);
-            } else {
-                console.error('[PartySearch] Save failed - status:', r.status, 'party_id:', r.party_id);
-                Swal.fire('Error', r.message || 'Could not add party.', 'error');
+                    if (input) input.focus();
+                }, 500);
             }
-        }).catch((err) => {
-            console.error('[PartySearch] Save party error:', err);
-            Swal.fire('Error', 'Failed to save party.', 'error');
         });
     }
 

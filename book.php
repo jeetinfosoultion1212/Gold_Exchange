@@ -109,10 +109,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             $party_name = $conn->real_escape_string($_POST['party_name'] ?? '');
             $address = $conn->real_escape_string($_POST['address'] ?? '');
             $contact_no = $conn->real_escape_string($_POST['contact_no'] ?? '');
+            $gstin = $conn->real_escape_string($_POST['gstin'] ?? '');
+            $state = $conn->real_escape_string($_POST['state'] ?? '');
+            $city = $conn->real_escape_string($_POST['city'] ?? '');
+            $bank_details = $conn->real_escape_string($_POST['bank_details'] ?? '');
             
-            $sql = "INSERT INTO parties (company_id, party_name, address, contact_no) VALUES (?, ?, ?, ?)";
+            $sql = "INSERT INTO parties (company_id, party_name, address, contact_no, gstin, state, city, bank_details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
             $stmt = $conn->prepare($sql);
-            $stmt->bind_param("isss", $company_id, $party_name, $address, $contact_no);
+            $stmt->bind_param("isssssss", $company_id, $party_name, $address, $contact_no, $gstin, $state, $city, $bank_details);
             
             if ($stmt->execute()) {
                 $party_id = $stmt->insert_id;

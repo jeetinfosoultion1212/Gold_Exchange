@@ -28,7 +28,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         switch ($_POST['action']) {
             case 'get_tables':
                 // Only show actual database tables from schema
-                $actual_tables = ['users', 'parties', 'transactions', 'gold_stock'];
+                $actual_tables = ['users', 'parties', 'transactions', 'exchange_items', 'gold_stock'];
                 
                 // Protected tables that should not be edited
                 $protected_tables = ['companies', 'transaction_logs', 'party_summary', 'daily_summary'];
@@ -362,6 +362,147 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
                 }
                 exit;
+
+            case 'update_company_pin':
+                if ($_SESSION['role'] !== 'Admin') {
+                    echo json_encode(['status' => 'error', 'message' => 'Unauthorized access']);
+                    exit;
+                }
+                
+                $new_pin = $conn->real_escape_string($_POST['pin']);
+                if (strlen($new_pin) < 4 || strlen($new_pin) > 6 || !ctype_digit($new_pin)) {
+                    echo json_encode(['status' => 'error', 'message' => 'PIN must be 4-6 digits']);
+                    exit;
+                }
+                
+                $update_query = "UPDATE companies SET pin = '$new_pin' WHERE id = $company_id";
+                if ($conn->query($update_query)) {
+                    echo json_encode(['status' => 'success', 'message' => 'PIN updated successfully']);
+                } else {
+                    echo json_encode(['status' => 'error', 'message' => 'Update failed: ' . $conn->error]);
+                }
+                exit;
+
+            case 'get_company_info':
+                if ($_SESSION['role'] !== 'Admin') {
+                    echo json_encode(['status' => 'error', 'message' => 'Unauthorized access']);
+                    exit;
+                }
+                
+                $info_query = "SELECT * FROM companies WHERE id = $company_id";
+                $info_result = $conn->query($info_query);
+                if ($info = $info_result->fetch_assoc()) {
+                    echo json_encode(['status' => 'success', 'data' => $info]);
+                } else {
+                    echo json_encode(['status' => 'error', 'message' => 'Company not found']);
+                }
+                exit;
+
+            case 'update_company_profile':
+                if ($_SESSION['role'] !== 'Admin') {
+                    echo json_encode(['status' => 'error', 'message' => 'Unauthorized access']);
+                    exit;
+                }
+                
+                $company_name = $conn->real_escape_string($_POST['company_name']);
+                $company_address = $conn->real_escape_string($_POST['company_address']);
+                $company_contact = $conn->real_escape_string($_POST['company_contact']);
+                $company_email = $conn->real_escape_string($_POST['company_email']);
+                $state = $conn->real_escape_string($_POST['state']);
+                $city = $conn->real_escape_string($_POST['city']);
+                $gstin = $conn->real_escape_string($_POST['gstin']);
+                $pin = $conn->real_escape_string($_POST['pin']);
+                
+                $sql = "UPDATE companies SET 
+                        company_name = '$company_name',
+                        company_address = '$company_address',
+                        company_contact = '$company_contact',
+                        company_email = '$company_email',
+                        state = '$state',
+                        city = '$city',
+                        gstin = '$gstin',
+                        pin = '$pin'
+                        WHERE id = $company_id";
+                
+                if ($conn->query($sql)) {
+                    $_SESSION['company_name'] = $company_name; // Sync session
+                    echo json_encode(['status' => 'success', 'message' => 'Company profile updated successfully']);
+                } else {
+                    echo json_encode(['status' => 'error', 'message' => 'Update failed: ' . $conn->error]);
+                }
+                exit;
+
+            case 'get_company_banks':
+                $sql = "SELECT * FROM company_banks WHERE company_id = $company_id ORDER BY is_primary DESC, id ASC";
+                $result = $conn->query($sql);
+                $banks = [];
+                while ($row = $result->fetch_assoc()) {
+                    $banks[] = $row;
+                }
+                echo json_encode(['status' => 'success', 'banks' => $banks]);
+                exit;
+
+            case 'add_company_bank':
+                if ($_SESSION['role'] !== 'Admin') {
+                    echo json_encode(['status' => 'error', 'message' => 'Unauthorized access']);
+                    exit;
+                }
+                $holder = $conn->real_escape_string($_POST['account_holder_name']);
+                $bank = $conn->real_escape_string($_POST['bank_name']);
+                $acc = $conn->real_escape_string($_POST['account_no']);
+                $ifsc = $conn->real_escape_string($_POST['ifsc_code']);
+                $branch = isset($_POST['branch_name']) ? $conn->real_escape_string($_POST['branch_name']) : '';
+                $balance = isset($_POST['balance']) ? floatval($_POST['balance']) : 0;
+                
+                $sql = "INSERT INTO company_banks (company_id, account_holder_name, bank_name, account_no, ifsc_code, branch_name, balance) 
+                        VALUES ($company_id, '$holder', '$bank', '$acc', '$ifsc', '$branch', $balance)";
+                if ($conn->query($sql)) {
+                    echo json_encode(['status' => 'success', 'message' => 'Bank account added successfully']);
+                } else {
+                    echo json_encode(['status' => 'error', 'message' => 'Add failed: ' . $conn->error]);
+                }
+                exit;
+
+            case 'delete_company_bank':
+                if ($_SESSION['role'] !== 'Admin') {
+                    echo json_encode(['status' => 'error', 'message' => 'Unauthorized access']);
+                    exit;
+                }
+                $bank_id = intval($_POST['bank_id']);
+                $sql = "DELETE FROM company_banks WHERE id = $bank_id AND company_id = $company_id";
+                if ($conn->query($sql)) {
+                    echo json_encode(['status' => 'success', 'message' => 'Bank account removed successfully']);
+                } else {
+                    echo json_encode(['status' => 'error', 'message' => 'Delete failed: ' . $conn->error]);
+                }
+                exit;
+
+            case 'get_store_staff':
+                if ($_SESSION['role'] !== 'Admin') { echo json_encode(['status' => 'error', 'message' => 'Unauthorized']); exit; }
+                $sql = "SELECT id, username, role, created_at FROM users WHERE company_id = $company_id ORDER BY id ASC";
+                $result = $conn->query($sql);
+                $staff = [];
+                if ($result) {
+                    while ($row = $result->fetch_assoc()) {
+                        $staff[] = $row;
+                    }
+                }
+                echo json_encode(['status' => 'success', 'staff' => $staff]);
+                exit;
+
+            case 'add_store_user':
+                if ($_SESSION['role'] !== 'Admin') { echo json_encode(['status' => 'error', 'message' => 'Unauthorized']); exit; }
+                $username = $conn->real_escape_string($_POST['username']);
+                $password = password_hash($_POST['password'], PASSWORD_DEFAULT);
+                $role = $conn->real_escape_string($_POST['role']);
+                
+                $sql = "INSERT INTO users (username, password, role, company_id) VALUES ('$username', '$password', '$role', $company_id)";
+                if ($conn->query($sql)) {
+                    echo json_encode(['status' => 'success', 'message' => 'User added successfully']);
+                } else {
+                    echo json_encode(['status' => 'error', 'message' => 'Failed: ' . $conn->error]);
+                }
+                exit;
         }
     }
 }
@@ -395,28 +536,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <?php include 'components/sidebar.php'; ?>
         
         <!-- Main Content -->
-        <div class="flex-1 p-6 ml-64">
-            <div class="max-w-7xl mx-auto">
-                <!-- Page Header -->
-                <div class="mb-6">
-                    <h1 class="text-3xl font-bold text-gray-800" style="font-family: 'Poppins', sans-serif;">
-                        <i class="fas fa-cog mr-2 text-slate-600"></i>Database Settings
-                    </h1>
-                    <p class="text-gray-600 mt-1" style="font-family: 'Poppins', sans-serif; font-weight: 400;">Manage your database, backup, restore, and edit data</p>
+        <div class="flex-1 p-2 ml-16">
+            <div class="w-full">
+                <!-- Page Header (Compact) -->
+                <div class="mb-3 px-2 flex items-center justify-between">
+                    <div>
+                        <h1 class="text-[15px] font-bold text-slate-800 uppercase tracking-tight" style="font-family: 'Poppins', sans-serif;">
+                            <i class="fas fa-cog mr-2 text-slate-500 text-xs"></i>Settings Center
+                        </h1>
+                        <p class="text-[9px] text-slate-400 font-bold uppercase tracking-widest ">Core Infrastructure & Staff</p>
+                    </div>
                 </div>
                 
-                <!-- Settings Tabs -->
-                <div class="bg-white rounded-lg shadow-sm mb-6 border border-gray-200">
-                    <div class="border-b border-gray-200">
-                        <nav class="flex space-x-4 px-6" aria-label="Tabs">
-                            <button onclick="showTab('backup')" id="tab-backup" class="tab-btn active px-4 py-3 text-sm font-medium border-b-2 border-slate-500 text-slate-700" style="font-family: 'Poppins', sans-serif;">
-                                <i class="fas fa-download mr-2"></i>Backup & Restore
+                <!-- Settings Tabs (Compact) -->
+                <div class="bg-white rounded border border-slate-100 mb-3 shadow-xs">
+                    <div class="border-b border-slate-100">
+                        <nav class="flex px-1" aria-label="Tabs">
+                            <?php if ($_SESSION['role'] === 'Admin'): ?>
+                            <button onclick="showTab('company')" id="tab-company" class="tab-btn px-4 py-2 text-[10px] font-bold border-b-2 transition-all duration-200 border-indigo-600 text-indigo-700 uppercase tracking-widest" style="font-family: 'Poppins', sans-serif;">
+                                <i class="fas fa-building mr-1.5 opacity-80"></i>Store Profile
                             </button>
-                            <button onclick="showTab('tables')" id="tab-tables" class="tab-btn px-4 py-3 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" style="font-family: 'Poppins', sans-serif;">
-                                <i class="fas fa-table mr-2"></i>Manage Tables
+                            <?php endif; ?>
+                            <button onclick="showTab('backup')" id="tab-backup" class="tab-btn px-4 py-2 text-[10px] font-bold border-b-2 transition-all duration-200 border-transparent text-slate-400 hover:text-slate-600 uppercase tracking-widest" style="font-family: 'Poppins', sans-serif;">
+                                <i class="fas fa-download mr-1.5 opacity-70"></i>Backup
                             </button>
-                            <button onclick="showTab('reset')" id="tab-reset" class="tab-btn px-4 py-3 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700" style="font-family: 'Poppins', sans-serif;">
-                                <i class="fas fa-trash-restore mr-2"></i>Reset Data
+                            <button onclick="showTab('tables')" id="tab-tables" class="tab-btn px-4 py-2 text-[10px] font-bold border-b-2 transition-all duration-200 border-transparent text-slate-400 hover:text-slate-600 uppercase tracking-widest" style="font-family: 'Poppins', sans-serif;">
+                                <i class="fas fa-table mr-1.5 opacity-70"></i>Tables
+                            </button>
+                            <button onclick="showTab('reset')" id="tab-reset" class="tab-btn px-4 py-2 text-[10px] font-bold border-b-2 transition-all duration-200 border-transparent text-slate-400 hover:text-slate-600 uppercase tracking-widest" style="font-family: 'Poppins', sans-serif;">
+                                <i class="fas fa-trash-restore mr-1.5 opacity-70"></i>Reset
                             </button>
                         </nav>
                     </div>
@@ -426,14 +574,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <div id="content-backup" class="tab-content">
                     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                         <!-- Create Backup -->
-                        <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-                            <h2 class="text-xl font-semibold text-gray-800 mb-4" style="font-family: 'Poppins', sans-serif;">
-                                <i class="fas fa-save text-slate-600 mr-2"></i>Create Backup
+                        <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                            <h2 class="text-[13px] font-bold text-gray-800 mb-2" style="font-family: 'Poppins', sans-serif;">
+                                <i class="fas fa-save text-slate-600 mr-2 text-xs"></i>Data Maintenance
                             </h2>
-                            <p class="text-gray-600 mb-4" style="font-family: 'Poppins', sans-serif; font-weight: 400;">Create a complete backup of your database</p>
-                            <button onclick="createBackup()" class="w-full bg-slate-600 hover:bg-slate-700 text-white font-medium py-3 px-4 rounded-lg transition shadow-sm" style="font-family: 'Poppins', sans-serif;">
-                                <i class="fas fa-download mr-2"></i>Create New Backup
-                            </button>
+                            <div class="space-y-3">
+                                <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
+                                    <p class="text-[10px] uppercase font-black text-gray-400 mb-2 tracking-widest">Standard Backup</p>
+                                    <button onclick="createBackup()" class="w-full bg-slate-600 hover:bg-slate-700 text-white text-[11px] font-bold py-2 px-4 rounded transition shadow-sm">
+                                        <i class="fas fa-download mr-2"></i>Generate New SQL Backup
+                                    </button>
+                                </div>
+                                
+                                <div class="p-3 bg-blue-50 rounded-lg border border-blue-100">
+                                    <p class="text-[10px] uppercase font-black text-blue-400 mb-2 tracking-widest">Infrastructure Update</p>
+                                    <button onclick="runDatabaseMigration()" class="w-full bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-bold py-2 px-4 rounded transition shadow-md">
+                                        <i class="fas fa-hammer mr-2"></i>Upgrade Database Schema
+                                    </button>
+                                    <p class="text-[9px] text-blue-600 mt-2 italic">* Required for GSTIN & Multi-Bank features</p>
+                                </div>
+                            </div>
                         </div>
                         
                         <!-- Restore Backup -->
@@ -471,11 +631,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <div id="content-tables" class="tab-content hidden">
                     <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
                         <div class="flex justify-between items-center mb-4">
-                            <h2 class="text-xl font-semibold text-gray-800" style="font-family: 'Poppins', sans-serif;">
-                                <i class="fas fa-database text-slate-600 mr-2"></i>Database Tables
+                            <h2 class="text-[13px] font-bold text-gray-800 uppercase tracking-tight" style="font-family: 'Poppins', sans-serif;">
+                                <i class="fas fa-database text-slate-600 mr-2 text-xs"></i>Data Explorer
                             </h2>
-                            <button onclick="loadTables()" class="bg-slate-500 hover:bg-slate-600 text-white px-4 py-2 rounded-lg font-medium shadow-sm" style="font-family: 'Poppins', sans-serif;">
-                                <i class="fas fa-sync mr-2"></i>Refresh
+                            <button onclick="loadTables()" class="bg-slate-500 hover:bg-slate-600 text-white px-3 py-1.5 rounded-lg text-[10px] font-bold shadow-sm transition">
+                                <i class="fas fa-sync mr-1.5 opacity-70"></i>Refresh Schema
                             </button>
                         </div>
                         
@@ -533,15 +693,150 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             </div>
                         </div>
                         
-                        <h2 class="text-xl font-semibold text-gray-800 mb-4" style="font-family: 'Poppins', sans-serif;">
-                            <i class="fas fa-trash-restore text-rose-500 mr-2"></i>Reset Tables
+                        <h2 class="text-[13px] font-bold text-gray-800 mb-4 uppercase tracking-tight" style="font-family: 'Poppins', sans-serif;">
+                            <i class="fas fa-trash-restore text-rose-500 mr-2 text-xs"></i>Purge Controllers
                         </h2>
                         
-                        <div id="resetTablesList" class="grid grid-cols-2 md:grid-cols-3 gap-4">
-                            <p class="text-gray-400">Loading tables...</p>
+                        <div id="resetTablesList" class="grid grid-cols-3 md:grid-cols-4 gap-3">
+                            <p class="text-gray-400 text-[10px]">Loading tables...</p>
                         </div>
                     </div>
                 </div>
+
+                <!-- Company Settings Tab -->
+                <?php if ($_SESSION['role'] === 'Admin'): ?>
+                <div id="content-company" class="tab-content hidden">
+                        <h2 class="text-[14px] font-bold text-slate-800 mb-2 px-2" style="font-family: 'Poppins', sans-serif;">
+                            <i class="fas fa-building text-indigo-600 mr-2 text-xs"></i>Store & Security Infrastructure
+                        </h2>
+                        
+                        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+                             <!-- Company Profile Info -->
+                             <div class="lg:col-span-3 p-3 bg-white rounded border border-slate-200 shadow-sm">
+                                 <div class="flex items-center justify-between mb-3">
+                                     <div class="flex items-center">
+                                         <div class="w-6 h-6 bg-slate-100 rounded flex items-center justify-center mr-2">
+                                             <i class="fas fa-info-circle text-slate-500 text-[10px]"></i>
+                                         </div>
+                                         <h3 class="text-[11px] font-bold text-slate-700 uppercase tracking-tight" style="font-family: 'Poppins', sans-serif;">Store Profile Information</h3>
+                                     </div>
+                                     <button onclick="saveCompanyProfile()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded text-[10px] font-bold shadow-sm transition transform active:scale-95 uppercase tracking-wider">
+                                         <i class="fas fa-save mr-1.5 text-[9px]"></i>Save Profile
+                                     </button>
+                                 </div>
+                                 
+                                 <form id="companyProfileForm" class="grid grid-cols-12 gap-2 mb-4">
+                                     <div class="col-span-12 grid grid-cols-12 gap-2 bg-slate-50/50 p-2 rounded border border-slate-100">
+                                         <div class="col-span-4">
+                                             <label class="block text-[8px] font-bold text-slate-600 uppercase mb-0.5 tracking-tighter">Company Name</label>
+                                             <input type="text" name="company_name" id="profile_company_name" class="w-full border border-slate-200 rounded px-1.5 py-1 text-[11px] font-semibold focus:ring-1 focus:ring-indigo-400 h-7" style="font-family: 'Poppins', sans-serif;">
+                                         </div>
+                                         <div class="col-span-2">
+                                             <label class="block text-[8px] font-bold text-slate-600 uppercase mb-0.5 tracking-tighter">Contact No</label>
+                                             <input type="text" name="company_contact" id="profile_company_contact" class="w-full border border-slate-200 rounded px-1.5 py-1 text-[11px] font-semibold focus:ring-1 focus:ring-indigo-400 h-7" style="font-family: 'Poppins', sans-serif;">
+                                         </div>
+                                         <div class="col-span-3">
+                                             <label class="block text-[8px] font-bold text-slate-600 uppercase mb-0.5 tracking-tighter">GSTIN</label>
+                                             <input type="text" name="gstin" id="profile_gstin" class="w-full border border-slate-200 rounded px-1.5 py-1 text-[11px] font-bold uppercase focus:ring-1 focus:ring-indigo-400 h-7" style="font-family: 'Poppins', sans-serif;">
+                                         </div>
+                                         <div class="col-span-3">
+                                             <label class="block text-[8px] font-bold text-indigo-600 uppercase mb-0.5 tracking-tighter">Security Access PIN</label>
+                                             <input type="password" name="pin" id="profile_pin" class="w-full border-2 border-indigo-100 rounded px-1.5 py-1 text-[11px] font-bold text-indigo-700 bg-white focus:ring-1 focus:ring-indigo-400 text-center tracking-widest h-7" placeholder="****">
+                                         </div>
+
+                                         <div class="col-span-4">
+                                             <label class="block text-[8px] font-bold text-slate-600 uppercase mb-0.5 tracking-tighter">Physical Address</label>
+                                             <input type="text" name="company_address" id="profile_company_address" class="w-full border border-slate-200 rounded px-1.5 py-1 text-[11px] font-semibold focus:ring-1 focus:ring-indigo-400 h-7" style="font-family: 'Poppins', sans-serif;" placeholder="Street, Area">
+                                         </div>
+                                         <div class="col-span-2">
+                                             <label class="block text-[8px] font-bold text-slate-600 uppercase mb-0.5 tracking-tighter">City</label>
+                                             <input type="text" name="city" id="profile_city" class="w-full border border-slate-200 rounded px-1.5 py-1 text-[11px] font-semibold focus:ring-1 focus:ring-indigo-400 h-7" style="font-family: 'Poppins', sans-serif;">
+                                         </div>
+                                         <div class="col-span-3">
+                                             <label class="block text-[8px] font-bold text-slate-600 uppercase mb-0.5 tracking-tighter">State</label>
+                                             <select name="state" id="profile_state" class="w-full border border-slate-200 rounded px-1 py-1 text-[11px] font-bold focus:ring-1 focus:ring-indigo-400 h-7 appearance-none bg-white" style="font-family: 'Poppins', sans-serif;">
+                                                 <option value="">Select State</option>
+                                                 <option value="Andhra Pradesh">Andhra Pradesh</option>
+                                                 <option value="Arunachal Pradesh">Arunachal Pradesh</option>
+                                                 <option value="Assam">Assam</option>
+                                                 <option value="Bihar">Bihar</option>
+                                                 <option value="Chhattisgarh">Chhattisgarh</option>
+                                                 <option value="Goa">Goa</option>
+                                                 <option value="Gujarat">Gujarat</option>
+                                                 <option value="Haryana">Haryana</option>
+                                                 <option value="Himachal Pradesh">Himachal Pradesh</option>
+                                                 <option value="Jharkhand">Jharkhand</option>
+                                                 <option value="Karnataka">Karnataka</option>
+                                                 <option value="Kerala">Kerala</option>
+                                                 <option value="Madhya Pradesh">Madhya Pradesh</option>
+                                                 <option value="Maharashtra">Maharashtra</option>
+                                                 <option value="Manipur">Manipur</option>
+                                                 <option value="Meghalaya">Meghalaya</option>
+                                                 <option value="Mizoram">Mizoram</option>
+                                                 <option value="Nagaland">Nagaland</option>
+                                                 <option value="Odisha">Odisha</option>
+                                                 <option value="Punjab">Punjab</option>
+                                                 <option value="Rajasthan">Rajasthan</option>
+                                                 <option value="Sikkim">Sikkim</option>
+                                                 <option value="Tamil Nadu">Tamil Nadu</option>
+                                                 <option value="Telangana">Telangana</option>
+                                                 <option value="Tripura">Tripura</option>
+                                                 <option value="Uttar Pradesh">Uttar Pradesh</option>
+                                                 <option value="Uttarakhand">Uttarakhand</option>
+                                                 <option value="West Bengal">West Bengal</option>
+                                                 <option value="Andaman and Nicobar Islands">Andaman and Nicobar Islands</option>
+                                                 <option value="Chandigarh">Chandigarh</option>
+                                                 <option value="Dadra and Nagar Haveli and Daman and Diu">Dadra and Nagar Haveli and Daman and Diu</option>
+                                                 <option value="Delhi">Delhi</option>
+                                                 <option value="Jammu and Kashmir">Jammu and Kashmir</option>
+                                                 <option value="Ladakh">Ladakh</option>
+                                                 <option value="Lakshadweep">Lakshadweep</option>
+                                                 <option value="Puducherry">Puducherry</option>
+                                             </select>
+                                         </div>
+                                         <div class="col-span-3">
+                                             <label class="block text-[8px] font-bold text-slate-600 uppercase mb-0.5 tracking-tighter">Registration Email</label>
+                                             <input type="email" name="company_email" id="profile_company_email" class="w-full border border-slate-200 rounded px-1.5 py-1 text-[11px] font-semibold focus:ring-1 focus:ring-indigo-400 h-7" style="font-family: 'Poppins', sans-serif;">
+                                         </div>
+                                     </div>
+                                 </form>
+
+                                <!-- Two Columns for Banks and Users -->
+                                <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                                    <!-- Company Banks Section -->
+                                    <div class="bg-white p-2 border border-slate-200 rounded shadow-xs">
+                                        <div class="flex items-center justify-between mb-2 border-b border-slate-100 pb-1">
+                                            <h4 class="text-[10px] font-bold text-slate-700 uppercase tracking-tight"><i class="fas fa-university mr-1.5 text-indigo-500"></i>Active Bank Accounts</h4>
+                                            <button onclick="addBankModal()" class="text-[8px] bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded font-bold hover:bg-indigo-100 transition uppercase tracking-wider">
+                                                <i class="fas fa-plus mr-1"></i>Add Linked Bank
+                                            </button>
+                                        </div>
+                                        <div id="companyBanksList" class="grid grid-cols-1 gap-1.5">
+                                            <!-- Banks will be dynamically loaded -->
+                                            <div class="text-center py-4 text-slate-300 italic text-[9px]">No linked accounts.</div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Staff/Users Section -->
+                                    <div class="bg-indigo-50/50 p-2 border border-indigo-100 rounded shadow-sm">
+                                        <div class="flex items-center justify-between mb-2 border-b border-indigo-100 pb-1">
+                                            <h4 class="text-[10px] font-bold text-indigo-800 uppercase tracking-tight"><i class="fas fa-user-shield mr-1.5 text-indigo-500"></i>Authorized Staff</h4>
+                                            <button onclick="addUserModal()" class="text-[8px] bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded font-bold hover:bg-indigo-200 transition uppercase tracking-wider">
+                                                <i class="fas fa-user-plus mr-1"></i>New User
+                                            </button>
+                                        </div>
+                                        <div id="storeStaffList" class="grid grid-cols-1 gap-1.5">
+                                            <!-- Users will be dynamically loaded -->
+                                            <div class="text-center py-2 text-slate-300 italic text-[9px]">Loading staff registry...</div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <?php endif; ?>
             </div>
         </div>
     </div>
@@ -571,6 +866,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 loadTables();
             } else if (tab === 'reset') {
                 loadResetTables();
+            } else if (tab === 'company') {
+                loadCompanyData();
             }
         }
         
@@ -1165,9 +1462,351 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         
         // Initialize
         $(document).ready(function() {
-            loadBackups();
+            // Check current hash or default to company
+            const activeTab = 'company';
+            showTab(activeTab);
         });
+
+        // Company PIN & Info functions
+        let companyDataLoaded = false;
+        
+        function loadCompanyData() {
+            $.post('', { action: 'get_company_info' }, function(response) {
+                console.log("Company Info Response:", response);
+                if (response.status === 'success') {
+                    const data = response.data;
+                    $('#profile_pin').val(data.pin || '');
+                    
+                    // Fill profile form
+                    $('#profile_company_name').val(data.company_name);
+                    $('#profile_company_contact').val(data.company_contact);
+                    $('#profile_company_email').val(data.company_email);
+                    $('#profile_company_address').val(data.company_address);
+                    $('#profile_city').val(data.city);
+                    $('#profile_state').val(data.state);
+                    $('#profile_gstin').val(data.gstin);
+                    
+                    companyDataLoaded = true;
+                    loadCompanyBanks();
+                    loadStoreStaff();
+                }
+            }, 'json');
+        }
+
+        function loadStoreStaff() {
+            const list = $('#storeStaffList');
+            $.post('', { action: 'get_store_staff' }, function(response) {
+                list.empty();
+                if (response.status === 'success' && response.staff && response.staff.length > 0) {
+                    response.staff.forEach(user => {
+                        const roleColor = user.role === 'Admin' ? 'text-rose-600 bg-rose-50 border-rose-100' : 'text-indigo-600 bg-white border-indigo-100';
+                        const roleIcon = user.role === 'Admin' ? 'fa-user-shield' : 'fa-user';
+                        list.append(`
+                            <div class="flex items-center justify-between p-2 bg-white border border-slate-100 rounded hover:border-indigo-100 transition-all shadow-xs">
+                                <div class="flex items-center gap-2">
+                                    <div class="w-7 h-7 rounded-full bg-slate-50 flex items-center justify-center border border-slate-100">
+                                        <i class="fas ${roleIcon} text-[9px] text-slate-400"></i>
+                                    </div>
+                                    <div>
+                                        <div class="text-[10px] font-bold text-slate-800 uppercase leading-none mb-1">${user.username}</div>
+                                        <div class="text-[7px] font-bold ${roleColor} border px-1.5 py-0.5 rounded uppercase tracking-wider">${user.role}</div>
+                                    </div>
+                                </div>
+                                <div class="text-[8px] text-slate-400 font-bold bg-slate-50 px-1.5 py-0.5 rounded border border-slate-100">ID: ${user.id}</div>
+                            </div>
+                        `);
+                    });
+                } else {
+                    list.html('<div class="text-center py-4 text-slate-300 italic text-[9px]">No authorized staff.</div>');
+                }
+            }, 'json');
+        }
+
+        function addUserModal() {
+            Swal.fire({
+                title: 'Add New Staff User',
+                html: `
+                    <div class="text-left p-2">
+                        <div class="mb-3">
+                            <label class="block text-[10px] font-black text-gray-400 uppercase mb-1">Username</label>
+                            <input type="text" id="user_username_val" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-xs font-bold focus:ring-1 focus:ring-blue-400" placeholder="Username">
+                        </div>
+                        <div class="mb-3">
+                            <label class="block text-[10px] font-black text-gray-400 uppercase mb-1">Password</label>
+                            <input type="password" id="user_password_val" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-xs font-bold focus:ring-1 focus:ring-blue-400" placeholder="****">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-black text-gray-400 uppercase mb-1">Role</label>
+                            <select id="user_role_val" class="w-full border border-gray-200 rounded px-2.5 py-1.5 text-xs font-bold focus:ring-1 focus:ring-blue-400">
+                                <option value="User">Standard User</option>
+                                <option value="Admin">Administrator</option>
+                            </select>
+                        </div>
+                    </div>
+                `,
+                showCancelButton: true,
+                confirmButtonText: 'Create User',
+                confirmButtonColor: '#3b82f6',
+                preConfirm: () => {
+                    return {
+                        username: $('#user_username_val').val(),
+                        password: $('#user_password_val').val(),
+                        role: $('#user_role_val').val()
+                    };
+                }
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    const data = result.value;
+                    if (!data.username || !data.password) {
+                        Swal.fire('Error', 'Username and Password required', 'warning');
+                        return;
+                    }
+
+                    $.post('', { action: 'add_store_user', ...data }, function(response) {
+                        if (response.status === 'success') {
+                            loadStoreStaff();
+                            Swal.fire({ icon: 'success', title: 'User Created', timer: 1000, showConfirmButton: false });
+                        } else {
+                            Swal.fire('Error', response.message, 'error');
+                        }
+                    }, 'json');
+                }
+            });
+        }
+
+        function loadCompanyBanks() {
+            const list = $('#companyBanksList');
+            $.post('', { action: 'get_company_banks' }, function(response) {
+                console.log("Banks Response:", response);
+                list.empty();
+                if (response.status === 'success' && response.banks && response.banks.length > 0) {
+                    response.banks.forEach(bank => {
+                        list.append(`
+                            <div class="group relative bg-slate-50 p-2 rounded border border-slate-100 hover:border-indigo-200 transition-all">
+                                <div class="flex items-center justify-between">
+                                    <div class="flex items-center gap-2">
+                                        <div class="w-6 h-6 rounded bg-white flex items-center justify-center border border-slate-100 shadow-xs">
+                                            <i class="fas fa-university text-slate-400 text-[10px]"></i>
+                                        </div>
+                                        <div>
+                                            <div class="text-[10px] font-bold text-slate-700 uppercase leading-none mb-0.5">${bank.bank_name || 'Unnamed Bank'}</div>
+                                            <div class="text-[9px] font-bold text-indigo-600 leading-none">${bank.account_no || ''}</div>
+                                        </div>
+                                    </div>
+                                    <button onclick="deleteBank(${bank.id})" class="text-slate-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-all p-1">
+                                        <i class="fas fa-trash text-[9px]"></i>
+                                    </button>
+                                </div>
+                                    <div class="mt-2 flex items-center justify-between border-t border-slate-200/50 pt-1.5">
+                                        <div class="flex flex-col">
+                                            <div class="text-[8px] font-bold text-slate-400 uppercase leading-none">IFSC: <span class="text-slate-600">${bank.ifsc_code || 'N/A'}</span></div>
+                                        </div>
+                                        <div class="text-right">
+                                            <div class="text-[12px] font-bold text-indigo-700 leading-none">₹${parseFloat(bank.balance || 0).toLocaleString('en-IN', {minimumFractionDigits: 2})}</div>
+                                        </div>
+                                    </div>
+                                </div>
+                        `);
+                    });
+                } else {
+                    list.html('<div class="col-span-2 text-center py-4 text-gray-400 italic text-xs">No bank accounts added yet.</div>');
+                }
+            }, 'json').fail(function() {
+                console.error("Failed to load company banks.");
+            });
+        }
+
+        function saveCompanyProfile() {
+            const formData = {
+                action: 'update_company_profile',
+                company_name: $('#profile_company_name').val(),
+                company_contact: $('#profile_company_contact').val(),
+                company_email: $('#profile_company_email').val(),
+                company_address: $('#profile_company_address').val(),
+                city: $('#profile_city').val(),
+                state: $('#profile_state').val(),
+                gstin: $('#profile_gstin').val(),
+                pin: $('#profile_pin').val()
+            };
+
+            Swal.fire({ title: 'Saving Profile...', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+
+            $.post('', formData, function(response) {
+                if (response.status === 'success') {
+                    Swal.fire({ icon: 'success', title: 'Saved!', text: response.message, timer: 1500, showConfirmButton: false });
+                } else {
+                    Swal.fire({ icon: 'error', title: 'Error', text: response.message });
+                }
+            }, 'json').fail(function(xhr) {
+                Swal.fire({ icon: 'error', title: 'Server Error', text: 'Failed to save profile. Please ensure database migration is run.' });
+            });
+        }
+
+        function addBankModal() {
+            Swal.fire({
+                title: 'Add Bank Account',
+                html: `
+                    <div class="space-y-4 text-left p-2">
+                        <div class="grid grid-cols-2 gap-4">
+                            <div class="col-span-2">
+                                <label class="block text-[10px] font-bold text-gray-500 uppercase mb-1">Bank Name</label>
+                                <input type="text" id="bank_name_val" class="w-full border border-gray-200 rounded px-3 py-2 text-sm font-semibold focus:ring-1 focus:ring-emerald-400" placeholder="e.g. HDFC Bank">
+                            </div>
+                            <div class="col-span-2">
+                                <label class="block text-[10px] font-bold text-gray-500 uppercase mb-1">Account Holder Name</label>
+                                <input type="text" id="holder_name_val" class="w-full border border-gray-200 rounded px-3 py-2 text-sm font-semibold focus:ring-1 focus:ring-emerald-400" placeholder="Holder Name">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] font-bold text-gray-500 uppercase mb-1">Account No</label>
+                                <input type="text" id="account_no_val" class="w-full border border-gray-200 rounded px-3 py-2 text-sm font-semibold focus:ring-1 focus:ring-emerald-400" placeholder="A/C No">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] font-bold text-gray-500 uppercase mb-1">IFSC Code</label>
+                                <input type="text" id="ifsc_code_val" class="w-full border border-gray-200 rounded px-3 py-2 text-sm font-semibold focus:ring-1 focus:ring-emerald-400 uppercase" placeholder="IFSC Code">
+                            </div>
+                            <div class="col-span-1">
+                                <label class="block text-[10px] font-bold text-gray-500 uppercase mb-1">Branch Name</label>
+                                <input type="text" id="branch_name_val" class="w-full border border-gray-200 rounded px-3 py-2 text-sm font-semibold focus:ring-1 focus:ring-emerald-400" placeholder="Branch Name">
+                            </div>
+                            <div class="col-span-1">
+                                <label class="block text-[10px] font-bold text-emerald-600 uppercase mb-1 font-black tracking-widest">Initial Balance</label>
+                                <input type="number" step="0.01" id="bank_balance_val" class="w-full border-2 border-emerald-200 rounded px-3 py-2 text-sm font-black text-emerald-700 focus:ring-2 focus:ring-emerald-500 bg-emerald-50" placeholder="0.00">
+                            </div>
+                        </div>
+                    </div>
+                `,
+                showCancelButton: true,
+                confirmButtonText: 'Add Account',
+                confirmButtonColor: '#10b981',
+                preConfirm: () => {
+                    return {
+                        bank_name: $('#bank_name_val').val(),
+                        account_holder_name: $('#holder_name_val').val(),
+                        account_no: $('#account_no_val').val(),
+                        ifsc_code: $('#ifsc_code_val').val(),
+                        branch_name: $('#branch_name_val').val(),
+                        balance: $('#bank_balance_val').val()
+                    };
+                }
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    const data = result.value;
+                    if (!data.bank_name) {
+                        Swal.fire('Error', 'Bank Name is required', 'warning');
+                        return;
+                    }
+
+                    $.post('', {
+                        action: 'add_company_bank',
+                        ...data
+                    }, function(response) {
+                        if (response.status === 'success') {
+                            loadCompanyBanks();
+                            Swal.fire({ icon: 'success', title: 'Added!', timer: 1000, showConfirmButton: false });
+                        } else {
+                            Swal.fire('Error', response.message, 'error');
+                        }
+                    }, 'json').fail(function() {
+                        Swal.fire('Error', 'Failed to add bank. Please ensure database migration is run.', 'error');
+                    });
+                }
+            });
+        }
+
+        function deleteBank(bankId) {
+            Swal.fire({
+                title: 'Remove Account?',
+                text: 'Are you sure you want to remove this bank account?',
+                icon: 'warning',
+                showCancelButton: true,
+                confirmButtonColor: '#ef4444',
+                confirmButtonText: 'Yes, Remove'
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    $.post('', { action: 'delete_company_bank', bank_id: bankId }, function(response) {
+                        if (response.status === 'success') {
+                            loadCompanyBanks();
+                        } else {
+                            Swal.fire('Error', response.message, 'error');
+                        }
+                    }, 'json');
+                }
+            });
+        }
+
+        function togglePinVisibility() {
+            const pinInput = $('#displayCompanyPin');
+            const eyeIcon = $('#pinEyeIcon');
+            
+            if (pinInput.attr('type') === 'password') {
+                pinInput.attr('type', 'text');
+                eyeIcon.removeClass('fa-eye').addClass('fa-eye-slash');
+            } else {
+                pinInput.attr('type', 'password');
+                eyeIcon.removeClass('fa-eye-slash').addClass('fa-eye');
+            }
+        }
+
+        function changePin() {
+            Swal.fire({
+                title: 'Change Security PIN',
+                text: 'Enter a new 4-6 digit numeric PIN for the company',
+                input: 'password',
+                inputAttributes: {
+                    maxlength: 6,
+                    autocapitalize: 'off',
+                    autocorrect: 'off'
+                },
+                showCancelButton: true,
+                confirmButtonText: 'Update PIN',
+                confirmButtonColor: '#2563eb',
+                inputValidator: (value) => {
+                    if (!value) return 'You need to enter a PIN!';
+                    if (!/^\d{4,6}$/.test(value)) return 'PIN must be 4 to 6 numeric digits!';
+                }
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    Swal.fire({ title: 'Updating...', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+                    
+                    $.post('', {
+                        action: 'update_company_pin',
+                        pin: result.value
+                    }, function(response) {
+                        if (response.status === 'success') {
+                            $('#displayCompanyPin').val(result.value);
+                            Swal.fire({
+                                icon: 'success',
+                                title: 'Success!',
+                                text: response.message,
+                                confirmButtonColor: '#2563eb'
+                            });
+                        } else {
+                            Swal.fire({ icon: 'error', title: 'Error', text: response.message });
+                        }
+                    }, 'json');
+                }
+            });
+        }
+
+        function runDatabaseMigration() {
+            Swal.fire({
+                title: 'Database Migration',
+                text: 'This will upgrade your database schema to support GSTIN and Multi-Bank features. Continue?',
+                icon: 'question',
+                showCancelButton: true,
+                confirmButtonColor: '#3b82f6',
+                confirmButtonText: 'Yes, Upgrade Now'
+            }).then((result) => {
+                if (result.isConfirmed) {
+                    Swal.fire({ title: 'Migrating...', allowOutsideClick: false, didOpen: () => Swal.showLoading() });
+                    window.location.href = 'tmp/update_db.php';
+                }
+            });
+        }
     </script>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
 

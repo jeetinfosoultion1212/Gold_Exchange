@@ -15,42 +15,49 @@ $user_name = $_SESSION['full_name'];
 $current_page = basename($_SERVER['PHP_SELF']);
 ?>
 
-<!-- Professional Dark Header (Compact) -->
-<header class="bg-gradient-to-r from-slate-900 via-blue-900 to-slate-900 shadow-xl border-b border-blue-800 sticky top-0 z-50 ml-16">
+<!-- Professional Dark Header (Enhanced & Responsive) -->
+<header class="bg-gradient-to-r from-slate-900 via-blue-900 to-slate-900 shadow-2xl border-b-2 border-blue-700/50 sticky top-0 z-50 ml-16">
     <div class="max-w-full mx-auto px-2">
-        <div class="flex justify-between items-center h-14"> <!-- Reduced height from 16 to 14 -->
-            <!-- Left Side - Logo Only -->
-            <div class="flex items-center space-x-2 flex-shrink-0 mr-2">
-                <!-- Logo -->
-                <div class="flex items-center space-x-2">
-                    <div class="w-8 h-8 bg-gradient-to-br from-yellow-400 to-yellow-600 rounded-lg flex items-center justify-center shadow-lg">
-                        <i class="fas fa-gem text-white text-xs"></i>
+        <div class="flex justify-between items-center h-14"> <!-- Reduced height -->
+            <!-- Left Side - Logo -->
+            <div class="flex items-center space-x-2 flex-shrink-0 mr-1">
+                <div class="flex items-center space-x-1.5">
+                    <div class="w-8 h-8 bg-gradient-to-br from-yellow-400 via-yellow-500 to-yellow-600 rounded-lg flex items-center justify-center shadow-xl ring-2 ring-yellow-400/30">
+                        <i class="fas fa-gem text-white text-[12px]"></i>
                     </div>
-                    <h1 class="text-base md:text-lg font-bold text-white tracking-tight hidden md:block" style="font-family: 'Poppins', sans-serif;"><?= htmlspecialchars($company_name) ?></h1>
+                    <h1 class="text-sm md:text-base font-bold text-white tracking-tight hidden lg:block" style="font-family: 'Poppins', sans-serif;"><?= htmlspecialchars($company_name) ?></h1>
                 </div>
             </div>
 
             <!-- Professional Navigation Menu -->
-            <nav class="flex items-center space-x-1 overflow-x-auto scrollbar-hide flex-grow justify-center">
+            <nav class="flex items-center gap-1 overflow-x-auto scrollbar-hide flex-grow justify-center px-1">
                 <style>
                 nav a { text-decoration: none !important; }
                 .scrollbar-hide::-webkit-scrollbar { display: none; }
                 .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+                .nav-btn {
+                    min-width: fit-content;
+                    white-space: nowrap;
+                    padding: 0.4rem 0.5rem;
+                }
+                @media (min-width: 1536px) {
+                    .nav-btn { padding: 0.5rem 0.75rem; }
+                }
                 </style>
                 
-                <!-- Buttons with tighter padding and smaller text -->
+                <!-- Enhanced Navigation Buttons -->
                 <?php
                 $nav_items = [
                     ['book.php', 'blue', 'book', 'BOOK', 'F1'],
                     ['gold_exchange.php', 'orange', 'exchange-alt', 'EXCH', 'F12'],
                     ['sell_gold.php', 'green', 'shopping-cart', 'SELL', 'F2'],
-                    ['purchase.php', 'purple', 'shopping-basket', 'PUR', 'F3'],
-                    ['payment_receipt.php', 'green', 'money-bill-wave', 'RCV', 'F4'], // Shortened Text
+                    ['purchase.php', 'purple', 'shopping-basket', 'PURCH', 'F3'],
+                    ['payment_receipt.php', 'emerald', 'money-bill-wave', 'RECEIVE', 'F4'],
                     ['gold_receipt.php', 'yellow', 'coins', 'GOLD', 'F8'],
                     ['payment_send.php', 'red', 'paper-plane', 'SEND', 'F11'],
                     ['party_ledger.php', 'pink', 'users', 'LEDGER', 'F6'],
-                    ['report.php', 'teal', 'chart-line', 'RPT', 'F9'],
-                    ['settings.php', 'slate', 'cog', 'SET', 'F7']
+                    ['report.php', 'teal', 'chart-line', 'REPORT', 'F9'],
+                    ['settings.php', 'slate', 'cog', 'SETTINGS', 'F7']
                 ];
 
                 foreach ($nav_items as $item) {
@@ -60,33 +67,44 @@ $current_page = basename($_SERVER['PHP_SELF']);
                     $label = $item[3];
                     $key = $item[4];
                     $isActive = $current_page === $link;
-                    $activeClass = $isActive ? 'ring-1 ring-yellow-400 shadow-yellow-400/50' : '';
+                    $activeClass = $isActive ? 'ring-2 ring-yellow-400 shadow-lg shadow-yellow-400/30 scale-105' : '';
                     
-                    // Specific color classes to avoid complex string concatenation
-                    $bgClass = "from-{$color}-500 to-{$color}-600 hover:from-{$color}-600 hover:to-{$color}-700";
-                    if ($color === 'slate') $bgClass = "from-slate-500 to-slate-600 hover:from-slate-600 hover:to-slate-700";
+                    // Color-specific gradients with proper Tailwind classes
+                    $colorMap = [
+                        'blue' => 'from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700',
+                        'orange' => 'from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700',
+                        'green' => 'from-green-500 to-green-600 hover:from-green-600 hover:to-green-700',
+                        'purple' => 'from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700',
+                        'emerald' => 'from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700',
+                        'yellow' => 'from-yellow-500 to-yellow-600 hover:from-yellow-600 hover:to-yellow-700',
+                        'red' => 'from-red-500 to-red-600 hover:from-red-600 hover:to-red-700',
+                        'pink' => 'from-pink-500 to-pink-600 hover:from-pink-600 hover:to-pink-700',
+                        'teal' => 'from-teal-500 to-teal-600 hover:from-teal-600 hover:to-teal-700',
+                        'slate' => 'from-slate-500 to-slate-600 hover:from-slate-600 hover:to-slate-700'
+                    ];
+                    $bgClass = $colorMap[$color] ?? $colorMap['slate'];
                     
                     echo "
                     <a href=\"$link\" 
-                       class=\"bg-gradient-to-r $bgClass text-white px-1.5 py-1.5 rounded-md flex items-center space-x-1 transition-all duration-300 shadow hover:shadow-md transform hover:scale-105 $activeClass\"
+                       class=\"nav-btn bg-gradient-to-br $bgClass text-white rounded-lg flex items-center gap-1 transition-all duration-300 shadow-md hover:shadow-xl transform hover:scale-105 $activeClass\"
                        title=\"$label ($key)\">
-                        <i class=\"fas fa-$icon w-3 h-3\"></i>
-                        <span class=\"text-[10px] md:text-xs font-bold tracking-wide hidden sm:inline\">$label</span>
-                        <kbd class=\"ml-1 px-1 py-0.5 bg-white/30 border border-white/50 rounded-sm text-[9px] font-mono shadow-sm hidden xl:inline\">$key</kbd>
+                        <i class=\"fas fa-$icon text-[11px]\"></i>
+                        <span class=\"text-[10.5px] font-bold tracking-tight hidden md:inline\">{$label}</span>
+                        <kbd class=\"px-1 py-0.5 bg-white/20 border border-white/40 rounded text-[9px] font-mono shadow-sm hidden 2xl:inline\">{$key}</kbd>
                     </a>";
                 }
                 ?>
             </nav>
 
             <!-- Right Side - Professional User Profile -->
-            <div class="flex items-center space-x-2 ml-2 flex-shrink-0">
+            <div class="flex items-center space-x-1.5 ml-1 flex-shrink-0">
                 <div class="relative group">
-                    <button id="userProfileBtn" class="flex items-center space-x-2 hover:opacity-80 transition-opacity cursor-pointer">
-                        <div class="w-8 h-8 bg-gradient-to-br from-yellow-400 to-yellow-600 rounded-full flex items-center justify-center shadow-lg">
+                    <button id="userProfileBtn" class="flex items-center space-x-1.5 hover:opacity-90 transition-all duration-200 cursor-pointer">
+                        <div class="w-8 h-8 bg-gradient-to-br from-yellow-400 via-yellow-500 to-yellow-600 rounded-full flex items-center justify-center shadow-xl ring-2 ring-yellow-400/30">
                             <span class="text-white font-bold text-xs tracking-tight"><?= strtoupper(substr($user_name, 0, 2)) ?></span>
                         </div>
-                        <div class="text-right hidden xl:block"> <!-- Only show name on XL screens -->
-                            <p class="text-xs font-semibold text-white tracking-tight leading-tight"><?= htmlspecialchars(substr($user_name, 0, 10)) . (strlen($user_name)>10?'..':'') ?></p>
+                        <div class="text-right hidden xl:block">
+                            <p class="text-[12px] font-semibold text-white tracking-tight leading-tight"><?= htmlspecialchars(substr($user_name, 0, 8)) . (strlen($user_name)>8?'..':'') ?></p>
                             <p class="text-[9px] text-gray-300 font-medium">Admin</p>
                         </div>
                         <i class="fas fa-chevron-down text-white text-[10px] hidden lg:block"></i>

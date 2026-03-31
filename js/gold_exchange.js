@@ -341,9 +341,15 @@ function displayPartyList(parties) {
             .attr('data-name', party.party_name)
             .attr('data-address', party.address || '')
             .html(`
-                <div class="font-semibold text-sm text-gray-800">${party.party_name}</div>
-                <div class="text-xs text-gray-600">${party.address || 'No address'}</div>
-                ${party.total_due_amount > 0 ? `<div class="text-xs text-red-600 font-medium">Due: ₹${parseFloat(party.total_due_amount).toFixed(2)}</div>` : ''}
+                <div class="flex justify-between items-start">
+                    <div class="font-bold text-[11px] text-slate-800 uppercase tracking-tight">${party.party_name}</div>
+                    <div class="text-[10px] text-slate-400 font-medium truncate max-w-[120px]">${party.address || 'No address'}</div>
+                </div>
+                <div class="flex items-center space-x-3 mt-1">
+                    ${parseFloat(party.total_due_amount) != 0 ? `<div class="text-[10px] text-rose-600 font-bold tracking-tight"><i class="fas fa-wallet mr-1 opacity-70"></i>₹${parseFloat(party.total_due_amount).toLocaleString()}</div>` : ''}
+                    ${parseFloat(party.total_due_gold) != 0 ? `<div class="text-[10px] text-amber-600 font-bold tracking-tight"><i class="fas fa-coins mr-1 opacity-70"></i>${parseFloat(party.total_due_gold).toFixed(3)}g</div>` : ''}
+                    ${parseFloat(party.total_due_silver) != 0 ? `<div class="text-[10px] text-slate-500 font-bold tracking-tight"><i class="fas fa-compact-disc mr-1 opacity-70"></i>${parseFloat(party.total_due_silver).toFixed(3)}g</div>` : ''}
+                </div>
             `)
             .click(function () {
                 selectParty(party);
@@ -438,85 +444,21 @@ function loadPartyDues(partyName) {
 
 // Show add party modal
 function showAddPartyModal() {
-    Swal.fire({
-        title: 'Add New Party',
-        html: `
-            <div class="text-left space-y-3">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Party Name *</label>
-                    <input type="text" id="newPartyName" class="w-full px-3 py-2 border border-gray-300 rounded-lg" required>
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Address</label>
-                    <input type="text" id="newPartyAddress" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Contact No</label>
-                    <input type="text" id="newPartyContact" class="w-full px-3 py-2 border border-gray-300 rounded-lg">
-                </div>
-            </div>
-        `,
-        showCancelButton: true,
-        confirmButtonText: 'Add Party',
-        confirmButtonColor: '#EAB308',
-        preConfirm: () => {
-            const partyName = $('#newPartyName').val();
-            const address = $('#newPartyAddress').val();
-            const contactNo = $('#newPartyContact').val();
+    SharedPartyHandler.showAddPartyModal({
+        onSuccess: function(response, partyData) {
+            $('#partyNameInput').val(partyData.party_name);
+            $('#partyId').val(response.party_id);
+            selectedPartyName = partyData.party_name;
+            
+            // Visual feedback
+            $('#partyNameInput').addClass('border-green-500');
+            setTimeout(() => $('#partyNameInput').removeClass('border-green-500'), 2000);
+            
+            // Load dues for the new party (now includes multi-metal)
+            loadPartyDues(partyData.party_name);
 
-            if (!partyName) {
-                Swal.showValidationMessage('Party name is required');
-                return false;
-            }
-
-            return { partyName, address, contactNo };
-        }
-    }).then((result) => {
-        if (result.isConfirmed) {
-            saveParty(result.value);
-        }
-    });
-}
-
-// Save party
-function saveParty(partyData) {
-    $.ajax({
-        url: '',
-        method: 'POST',
-        data: {
-            action: 'save_party',
-            party_name: partyData.partyName,
-            address: partyData.address,
-            contact_no: partyData.contactNo
-        },
-        dataType: 'json',
-        success: function (response) {
-            if (response.status === 'success') {
-                Swal.fire({
-                    icon: 'success',
-                    title: 'Success!',
-                    text: response.message,
-                    confirmButtonColor: '#EAB308'
-                });
-                $('#partyNameInput').val(partyData.partyName).addClass('border-green-500');
-                selectedPartyName = partyData.partyName;
-                $('#receivedWeight').focus();
-            } else {
-                Swal.fire({
-                    icon: 'error',
-                    title: 'Error!',
-                    text: response.message,
-                    confirmButtonColor: '#EAB308'
-                });
-            }
-        },
-        error: function () {
-            Swal.fire({
-                icon: 'error',
-                title: 'Error!',
-                text: 'Failed to add party',
-                confirmButtonColor: '#EAB308'
-            });
+            // Focus next field
+            $('#receivedWeight').focus();
         }
     });
 }
@@ -568,7 +510,13 @@ function createNewPartyQuick(partyName) {
                     icon: 'error',
                     title: 'Error!',
                     text: response.message,
-                    confirmButtonColor: '#EAB308'
+                    width: '320px',
+                    confirmButtonColor: '#ef4444',
+                    customClass: {
+                        title: 'text-sm font-bold',
+                        htmlContainer: 'text-[11px]',
+                        confirmButton: 'text-[10px] px-4 py-1.5 font-bold uppercase uppercase tracking-tighter'
+                    }
                 });
             }
         },
@@ -577,7 +525,13 @@ function createNewPartyQuick(partyName) {
                 icon: 'error',
                 title: 'Error!',
                 text: 'Failed to create party',
-                confirmButtonColor: '#EAB308'
+                width: '320px',
+                confirmButtonColor: '#ef4444',
+                customClass: {
+                    title: 'text-sm font-bold',
+                    htmlContainer: 'text-[11px]',
+                    confirmButton: 'text-[10px] px-4 py-1.5 font-bold uppercase uppercase tracking-tighter'
+                }
             });
         }
     });
@@ -601,13 +555,20 @@ function saveTransaction() {
                 // Show success message with print option
                 Swal.fire({
                     icon: 'success',
-                    title: 'Success!',
+                    title: 'Saved!',
                     text: response.message,
+                    width: '320px',
                     showCancelButton: true,
-                    confirmButtonText: '<i class="fas fa-print mr-2"></i>Print Receipt',
-                    cancelButtonText: 'Close',
-                    confirmButtonColor: '#EAB308',
-                    cancelButtonColor: '#6B7280'
+                    confirmButtonText: '<i class="fas fa-print mr-1"></i>PRINT',
+                    cancelButtonText: 'CLOSE',
+                    confirmButtonColor: '#2563eb',
+                    cancelButtonColor: '#64748b',
+                    customClass: {
+                        title: 'text-sm font-bold',
+                        htmlContainer: 'text-[11px]',
+                        confirmButton: 'text-[10px] px-3 py-1.5 font-bold uppercase tracking-tighter',
+                        cancelButton: 'text-[10px] px-3 py-1.5 font-bold uppercase tracking-tighter'
+                    }
                 }).then((result) => {
                     if (result.isConfirmed && response.transaction_id) {
                         // Open thermal receipt in new window
@@ -621,7 +582,13 @@ function saveTransaction() {
                     icon: 'error',
                     title: 'Error!',
                     text: response.message,
-                    confirmButtonColor: '#EAB308'
+                    width: '320px',
+                    confirmButtonColor: '#ef4444',
+                    customClass: {
+                        title: 'text-sm font-bold',
+                        htmlContainer: 'text-[11px]',
+                        confirmButton: 'text-[10px] px-4 py-1.5 font-bold uppercase tracking-tighter'
+                    }
                 });
             }
         },
@@ -629,8 +596,14 @@ function saveTransaction() {
             Swal.fire({
                 icon: 'error',
                 title: 'Error!',
-                text: 'Failed to save transaction',
-                confirmButtonColor: '#EAB308'
+                text: 'Operation failed',
+                width: '320px',
+                confirmButtonColor: '#ef4444',
+                customClass: {
+                    title: 'text-sm font-bold',
+                    htmlContainer: 'text-[11px]',
+                    confirmButton: 'text-[10px] px-4 py-1.5 font-bold uppercase tracking-tighter'
+                }
             });
         }
     });
@@ -723,7 +696,13 @@ function deleteTransaction(id) {
                             icon: 'error',
                             title: 'Error!',
                             text: response.message,
-                            confirmButtonColor: '#EAB308'
+                            width: '320px',
+                            confirmButtonColor: '#EAB308',
+                            customClass: {
+                                title: 'text-sm font-bold',
+                                htmlContainer: 'text-[11px]',
+                                confirmButton: 'text-[10px] px-4 py-1.5 font-bold uppercase tracking-tighter'
+                            }
                         });
                     }
                 },

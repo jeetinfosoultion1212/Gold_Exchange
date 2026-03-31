@@ -19,6 +19,7 @@ try {
 
     switch ($action) {
         case 'add_stock':
+            $category = $conn->real_escape_string($_POST['category'] ?? 'Gold');
             $purity = floatval($_POST['purity']);
             $amount = floatval($_POST['amount']);
             $stock_name = $conn->real_escape_string($_POST['stock_name'] ?? '');
@@ -27,11 +28,16 @@ try {
             
             $stock_id = isset($_POST['stock_id']) ? intval($_POST['stock_id']) : 0;
             
-            // Check if stock entry exists (by ID first, then fallback to purity check)
+            // Check if stock entry exists (by ID first, then fallback to category+purity+mode check)
             if ($stock_id > 0) {
                  $check_sql = "SELECT id, current_stock FROM gold_stock WHERE id = $stock_id AND company_id = $company_id";
             } else {
-                 $check_sql = "SELECT id, current_stock FROM gold_stock WHERE purity = $purity AND company_id = $company_id ORDER BY id DESC LIMIT 1";
+                 $check_sql = "SELECT id, current_stock FROM gold_stock 
+                              WHERE category = '$category' 
+                              AND purity = $purity 
+                              AND mode = '$stock_type' 
+                              AND company_id = $company_id 
+                              ORDER BY id DESC LIMIT 1";
             }
             $check_result = $conn->query($check_sql);
             
@@ -43,15 +49,15 @@ try {
                 $conn->query($update_sql);
             } else {
                 // Insert new stock entry
-                $insert_sql = "INSERT INTO gold_stock (company_id, stock_name, purity, current_stock, last_updated) 
-                               VALUES ($company_id, '$stock_name', $purity, $amount, NOW())";
+                $insert_sql = "INSERT INTO gold_stock (company_id, category, mode, purity, stock_name, current_stock, last_updated) 
+                               VALUES ($company_id, '$category', '$stock_type', $purity, '$stock_name', $amount, NOW())";
                 $conn->query($insert_sql);
             }
             
-            // Log transaction with stock_type
+            // Log transaction with stock_type and category
             $receipt_id = 'STK-' . strtoupper(uniqid());
             $log_sql = "INSERT INTO transactions (company_id, party_id, receipt_id, transaction_type, gold_weight, purity, payment_method, date_of_transaction, narration, created_by) 
-                        VALUES ($company_id, NULL, '$receipt_id', 'Stock_Addition', $amount, $purity, '$stock_type', NOW(), 'Stock Addition ($stock_name - $stock_type): $notes', $user_id)";
+                        VALUES ($company_id, NULL, '$receipt_id', 'Stock_Addition', $amount, $purity, '$stock_type', NOW(), '[$category] Stock Addition ($stock_name - $stock_type): $notes', $user_id)";
             $conn->query($log_sql);
             
             $conn->commit();

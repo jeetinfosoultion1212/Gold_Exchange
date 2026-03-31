@@ -3,7 +3,7 @@ session_start();
 
 // Check if user is already logged in
 if (isset($_SESSION['user_id'])) {
-    header('Location: book.php');
+    header('Location: gold_exchange.php');
     exit;
 }
 
@@ -18,18 +18,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $password = $_POST['password'];
     $remember = isset($_POST['remember']) ? true : false;
     
-    $sql = "SELECT u.*, c.company_name FROM users u 
+    $sql = "SELECT u.*, c.company_name, c.pin as company_pin FROM users u 
             JOIN companies c ON u.company_id = c.id 
-            WHERE u.username = ? AND u.status = 'Active'";
+            WHERE (u.username = ? OR u.email = ?) AND u.status = 'Active'";
     
     $stmt = $conn->prepare($sql);
-    $stmt->bind_param("s", $username);
+    $stmt->bind_param("ss", $username, $username);
     $stmt->execute();
     $result = $stmt->get_result();
     
     if ($user = $result->fetch_assoc()) {
         if (password_verify($password, $user['password'])) {
-            // Generate session token
+            // If company has a PIN, redirect to verify_pin.php
+            if (!empty($user['company_pin'])) {
+                $_SESSION['temp_user'] = $user;
+                if ($remember) {
+                    $_SESSION['temp_remember'] = true;
+                }
+                header('Location: verify_pin.php');
+                exit;
+            } else {
+                // Generate session token
             $session_token = bin2hex(random_bytes(32));
             
             // Set session variables
@@ -60,12 +69,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $update_stmt->bind_param("i", $user['id']);
             $update_stmt->execute();
             
-            header('Location: book.php');
+            header('Location: gold_exchange.php');
             exit;
+            }
         }
     }
     
-    $error = "Invalid username or password";
+    if (empty($error)) {
+        $error = "Invalid username or password";
+    }
 }
 
 // Check for remember me token
@@ -81,15 +93,22 @@ if (!isset($_SESSION['user_id']) && isset($_COOKIE['remember_token'])) {
     $result = $stmt->get_result();
     
     if ($user = $result->fetch_assoc()) {
-        $_SESSION['user_id'] = $user['id'];
-        $_SESSION['company_id'] = $user['company_id'];
-        $_SESSION['username'] = $user['username'];
-        $_SESSION['full_name'] = $user['full_name'];
-        $_SESSION['company_name'] = $user['company_name'];
-        $_SESSION['role'] = $user['role'];
-        
-        header('Location: book.php');
-        exit;
+        if (!empty($user['company_pin'])) {
+            $_SESSION['temp_user'] = $user;
+            // Note: Not setting temp_remember because we are already using a token
+            header('Location: verify_pin.php');
+            exit;
+        } else {
+            $_SESSION['user_id'] = $user['id'];
+            $_SESSION['company_id'] = $user['company_id'];
+            $_SESSION['username'] = $user['username'];
+            $_SESSION['full_name'] = $user['full_name'];
+            $_SESSION['company_name'] = $user['company_name'];
+            $_SESSION['role'] = $user['role'];
+            
+            header('Location: gold_exchange.php');
+            exit;
+        }
     }
 }
 
@@ -415,10 +434,10 @@ if (isset($_GET['success'])) {
             
             <form method="POST">
                 <div class="form-group">
-                    <label for="username" class="form-label">Username</label>
+                    <label for="username" class="form-label">Email or Mobile Number</label>
                     <div class="input-wrapper">
                         <i class="fas fa-user input-icon"></i>
-                        <input type="text" class="form-control" id="username" name="username" placeholder="Enter your username" required>
+                        <input type="text" class="form-control" id="username" name="username" placeholder="Enter email or mobile number" required>
                     </div>
                 </div>
                 
