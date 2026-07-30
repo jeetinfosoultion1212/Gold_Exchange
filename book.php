@@ -28,6 +28,8 @@ ini_set('error_log', __DIR__ . '/php_error.log');
 
 // Load database configuration
 require_once __DIR__ . '/config/database.php';
+require_once __DIR__ . '/helpers/gold_rate_helper.php';
+require_once __DIR__ . '/helpers/receipt_id_helper.php';
 
 // Verify database connection
 if (!isset($conn) || $conn->connect_error) {
@@ -46,6 +48,9 @@ $company_id = intval($_SESSION['company_id']);
 $user_id = intval($_SESSION['user_id']);
 $company_name = $_SESSION['company_name'] ?? '';
 $user_name = $_SESSION['full_name'] ?? '';
+$gold_rate_unit = gold_rate_get_unit($conn, $company_id);
+$gold_rate_label = gold_rate_label($gold_rate_unit);
+$gold_rate_suffix = gold_rate_suffix($gold_rate_unit);
 
 // Handle logout
 if (isset($_GET['logout'])) {
@@ -134,25 +139,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
             exit;
             
         case 'generate_booking_id':
-            $prefix = "B{$company_id}";
-            $lastIdSql = "SELECT receipt_id FROM transactions 
-                         WHERE company_id = ? 
-                         AND receipt_id LIKE '{$prefix}%' 
-                         ORDER BY receipt_id DESC 
-                         LIMIT 1";
-            $lastIdStmt = $conn->prepare($lastIdSql);
-            $lastIdStmt->bind_param("i", $company_id);
-            $lastIdStmt->execute();
-            $lastIdResult = $lastIdStmt->get_result();
-            
-            $nextSerial = 1;
-            if ($lastIdResult->num_rows > 0) {
-                $lastId = $lastIdResult->fetch_assoc()['receipt_id'];
-                $lastSerial = intval(substr($lastId, strlen($prefix)));
-                $nextSerial = $lastSerial + 1;
-            }
-            
-            $bookingId = "{$prefix}{$nextSerial}";
+            $bookingId = next_receipt_id($conn, $company_id, 'B', ['transaction_type' => 'Booking']);
             echo json_encode([
                 'status' => 'success',
                 'booking_id' => $bookingId
@@ -177,6 +164,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $result = $stmt->get_result();
                 $bookings = [];
                 while ($row = $result->fetch_assoc()) {
+                    gold_rate_apply_display_to_row($row, $gold_rate_unit);
                     $bookings[] = [
                         'id' => $row['id'],
                         'receipt_id' => $row['receipt_id'],
@@ -256,6 +244,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 } else {
                     $booking['total_received'] = 0;
                 }
+
+                gold_rate_apply_display_to_row($booking, $gold_rate_unit);
                 
                 echo json_encode($booking);
             } catch (Exception $e) {
@@ -293,7 +283,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $date_of_transaction = $conn->real_escape_string($_POST['date_of_transaction']);
                 $booking_weight = floatval($_POST['booking_weight']);
                 $purity = floatval($_POST['purity']);
-                $rate = floatval($_POST['rate']);
+                $rate = gold_rate_from_display(floatval($_POST['rate']), $gold_rate_unit);
                 $total_amount = floatval(str_replace(['₹', ','], '', $_POST['total_amount']));
                 $booking_type = $conn->real_escape_string($_POST['booking_type']);
                 $cash_received = floatval($_POST['cash_received'] ?? 0);
@@ -317,36 +307,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     throw new Exception("Selected party does not exist. Please select a valid party.");
                 }
                 
-                // Check if receipt_id already exists
-                $receipt_check_sql = "SELECT receipt_id FROM transactions WHERE receipt_id = ?";
-                $receipt_check_stmt = $conn->prepare($receipt_check_sql);
-                $receipt_check_stmt->bind_param("s", $receipt_id);
-                $receipt_check_stmt->execute();
-                $receipt_check_result = $receipt_check_stmt->get_result();
-                
-                if ($receipt_check_result->num_rows > 0) {
-                    // Generate a new booking ID if duplicate found
+                // Ensure booking ID is globally unique ({company_id}B{serial})
+                if (receipt_id_exists_globally($conn, $receipt_id)) {
                     error_log("Duplicate booking ID found: {$receipt_id}, generating new one");
-                    $prefix = "B{$company_id}";
-                    
-                    $lastIdSql = "SELECT receipt_id FROM transactions 
-                                 WHERE company_id = ? 
-                                 AND receipt_id LIKE '{$prefix}%' 
-                                 ORDER BY receipt_id DESC 
-                                 LIMIT 1";
-                    $lastIdStmt = $conn->prepare($lastIdSql);
-                    $lastIdStmt->bind_param("i", $company_id);
-                    $lastIdStmt->execute();
-                    $lastIdResult = $lastIdStmt->get_result();
-                    
-                    $nextSerial = 1;
-                    if ($lastIdResult->num_rows > 0) {
-                        $lastId = $lastIdResult->fetch_assoc()['receipt_id'];
-                        $lastSerial = intval(substr($lastId, strlen($prefix)));
-                        $nextSerial = $lastSerial + 1;
-                    }
-                    
-                    $receipt_id = "{$prefix}{$nextSerial}";
+                    $receipt_id = next_receipt_id($conn, $company_id, 'B', ['transaction_type' => 'Booking']);
                     error_log("Generated new booking ID: {$receipt_id}");
                 }
                 
@@ -386,26 +350,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                     
                     // If payment received, create received transaction with R prefix
                     if ($payment_amount > 0) {
-                        $received_prefix = "R{$company_id}";
-                        
-                        $receivedIdSql = "SELECT receipt_id FROM transactions 
-                                         WHERE company_id = ? 
-                                         AND receipt_id LIKE '{$received_prefix}%' 
-                                         ORDER BY receipt_id DESC 
-                                         LIMIT 1";
-                        $receivedIdStmt = $conn->prepare($receivedIdSql);
-                        $receivedIdStmt->bind_param("i", $company_id);
-                        $receivedIdStmt->execute();
-                        $receivedIdResult = $receivedIdStmt->get_result();
-                        
-                        $receivedNextSerial = 1;
-                        if ($receivedIdResult->num_rows > 0) {
-                            $receivedLastId = $receivedIdResult->fetch_assoc()['receipt_id'];
-                            $receivedLastSerial = intval(substr($receivedLastId, strlen($received_prefix)));
-                            $receivedNextSerial = $receivedLastSerial + 1;
-                        }
-                        
-                        $received_id = "{$received_prefix}{$receivedNextSerial}";
+                        $received_id = next_receipt_id($conn, $company_id, 'R', ['transaction_type' => 'Received']);
                         
                         $payment_sql = "INSERT INTO transactions (
                             company_id, party_id, receipt_id, transaction_type,
@@ -451,7 +396,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                             'party_contact' => $party_contact,
                             'booking_weight' => $booking_weight,
                             'purity' => $purity,
-                            'rate' => $rate,
+                            'rate' => gold_rate_to_display($rate, $gold_rate_unit),
                             'amount' => $total_amount,
                             'cash_received' => $cash_received,
                             'bank_received' => $bank_received,
@@ -496,7 +441,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                 $date_of_transaction = $conn->real_escape_string($_POST['date_of_transaction']);
                 $booking_weight = floatval($_POST['booking_weight']);
                 $purity = floatval($_POST['purity']);
-                $rate = floatval($_POST['rate']);
+                $rate = gold_rate_from_display(floatval($_POST['rate']), $gold_rate_unit);
                 $total_amount = floatval($_POST['total_amount']);
                 $booking_type = $conn->real_escape_string($_POST['booking_type']);
                 $narration = $conn->real_escape_string($_POST['narration'] ?? '');
@@ -541,7 +486,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
                             'party_name' => $party_name,
                             'booking_weight' => $booking_weight,
                             'purity' => $purity,
-                            'rate' => $rate,
+                            'rate' => gold_rate_to_display($rate, $gold_rate_unit),
                             'amount' => $total_amount,
                             'date_of_transaction' => $date_of_transaction
                         ]
@@ -732,12 +677,16 @@ $limit = 10;
 $offset = ($page - 1) * $limit;
 
 $search = isset($_GET['search']) ? trim($_GET['search']) : '';
+$start_date = isset($_GET['start_date']) && !empty($_GET['start_date']) ? $_GET['start_date'] : date('Y-m-01');
+$end_date = isset($_GET['end_date']) && !empty($_GET['end_date']) ? $_GET['end_date'] : date('Y-m-d');
 $transactions = [];
 $total_transactions = 0;
 $total_pages = 0;
 $current_page = $page;
 
 try {
+    $date_clause = "AND DATE(t.date_of_transaction) BETWEEN ? AND ?";
+    
     if ($search) {
         $search_escaped = $conn->real_escape_string($search);
         $where_clause = "AND (p.party_name LIKE ? OR t.receipt_id LIKE ?)";
@@ -746,15 +695,16 @@ try {
         $transactions_sql = "SELECT t.*, p.party_name, p.contact_no as party_contact 
                             FROM transactions t 
                             LEFT JOIN parties p ON t.party_id = p.id
-                            WHERE t.transaction_type IN ('Booking', 'Received') 
+                            WHERE t.transaction_type = 'Booking' 
                             AND t.company_id = ?
+                            $date_clause
                             $where_clause 
                             ORDER BY t.date_of_transaction DESC, t.id DESC 
                             LIMIT ?, ?";
         
         $stmt = $conn->prepare($transactions_sql);
         if ($stmt) {
-            $stmt->bind_param("issii", $company_id, $search_pattern, $search_pattern, $offset, $limit);
+            $stmt->bind_param("isssii", $company_id, $start_date, $end_date, $search_pattern, $search_pattern, $offset, $limit);
             $stmt->execute();
             $transactions_result = $stmt->get_result();
             if ($transactions_result) {
@@ -764,16 +714,16 @@ try {
             }
         }
         
-        // Count total transactions with search
         $total_sql = "SELECT COUNT(*) as count 
                       FROM transactions t 
                       LEFT JOIN parties p ON t.party_id = p.id
-                      WHERE t.transaction_type IN ('Booking', 'Received') 
+                      WHERE t.transaction_type = 'Booking' 
                       AND t.company_id = ?
+                      $date_clause
                       $where_clause";
         $count_stmt = $conn->prepare($total_sql);
         if ($count_stmt) {
-            $count_stmt->bind_param("iss", $company_id, $search_pattern, $search_pattern);
+            $count_stmt->bind_param("isss", $company_id, $start_date, $end_date, $search_pattern, $search_pattern);
             $count_stmt->execute();
             $total_result = $count_stmt->get_result();
             if ($total_result) {
@@ -785,14 +735,15 @@ try {
         $transactions_sql = "SELECT t.*, p.party_name, p.contact_no as party_contact 
                             FROM transactions t 
                             LEFT JOIN parties p ON t.party_id = p.id
-                            WHERE t.transaction_type IN ('Booking', 'Received') 
+                            WHERE t.transaction_type = 'Booking' 
                             AND t.company_id = ?
+                            $date_clause
                             ORDER BY t.date_of_transaction DESC, t.id DESC 
                             LIMIT ?, ?";
         
         $stmt = $conn->prepare($transactions_sql);
         if ($stmt) {
-            $stmt->bind_param("iii", $company_id, $offset, $limit);
+            $stmt->bind_param("issii", $company_id, $start_date, $end_date, $offset, $limit);
             $stmt->execute();
             $transactions_result = $stmt->get_result();
             if ($transactions_result) {
@@ -802,15 +753,15 @@ try {
             }
         }
         
-        // Count total transactions without search
         $total_sql = "SELECT COUNT(*) as count 
                       FROM transactions t 
                       LEFT JOIN parties p ON t.party_id = p.id
-                      WHERE t.transaction_type IN ('Booking', 'Received') 
-                      AND t.company_id = ?";
+                      WHERE t.transaction_type = 'Booking' 
+                      AND t.company_id = ?
+                      $date_clause";
         $count_stmt = $conn->prepare($total_sql);
         if ($count_stmt) {
-            $count_stmt->bind_param("i", $company_id);
+            $count_stmt->bind_param("iss", $company_id, $start_date, $end_date);
             $count_stmt->execute();
             $total_result = $count_stmt->get_result();
             if ($total_result) {
@@ -825,78 +776,115 @@ try {
     error_log("Transactions query error: " . $e->getMessage());
     // Use empty arrays/defaults already set above
 }
+
+$total_booking_weight = ($stats['total_cash_booking_weight'] ?? 0) + ($stats['total_bank_booking_weight'] ?? 0);
+$total_booking_amount = ($stats['total_cash_booking_amount'] ?? 0) + ($stats['total_bank_booking_amount'] ?? 0);
+$total_received_amount = ($stats['total_cash_received'] ?? 0) + ($stats['total_bank_received'] ?? 0);
 ?>
 
 <!-- Main Content Container -->
 <div class="w-full">
     <!-- Statistics Dashboard -->
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
-        <!-- Booking Weight -->
-        <div class="soft-gradient-blue rounded-xl p-4 shadow-sm h-full">
-            <div class="flex items-center justify-between">
-                <div>
-                    <p class="text-xs font-medium text-blue-700 mb-1">Booking Weight</p>
-                    <p class="text-lg font-bold text-blue-800 mb-0"><?= number_format(($stats['total_cash_booking_weight'] ?? 0) + ($stats['total_bank_booking_weight'] ?? 0), 1) ?>g</p>
-                    <p class="text-xs text-blue-600 mb-0">Cash: <?= number_format($stats['total_cash_booking_weight'] ?? 0, 1) ?>g | Bank: <?= number_format($stats['total_bank_booking_weight'] ?? 0, 1) ?>g</p>
-                </div>
-                <div class="w-10 h-10 bg-blue-500 rounded-lg flex items-center justify-center">
-                    <i class="fas fa-book text-white text-sm"></i>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Sell Weight -->
-        <div class="soft-gradient-green rounded-xl p-4 shadow-sm h-full">
-            <div class="flex items-center justify-between">
-                <div>
-                    <p class="text-xs font-medium text-green-700 mb-1">Sell Weight</p>
-                    <p class="text-lg font-bold text-green-800 mb-0"><?= number_format($stats['total_sale_weight'] ?? 0, 1) ?>g</p>
-                    <p class="text-xs text-green-600 mb-0">Gold Sold Today</p>
-                </div>
-                <div class="w-10 h-10 bg-green-500 rounded-lg flex items-center justify-center">
-                    <i class="fas fa-shopping-cart text-white text-sm"></i>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Purchase Weight -->
-        <div class="soft-gradient-orange rounded-xl p-4 shadow-sm h-full">
-            <div class="flex items-center justify-between">
-                <div>
-                    <p class="text-xs font-medium text-orange-700 mb-1">Purchase Weight</p>
-                    <p class="text-lg font-bold text-orange-800 mb-0"><?= number_format($stats['total_purchase_weight'] ?? 0, 1) ?>g</p>
-                    <p class="text-xs text-orange-600 mb-0">Gold Purchased Today</p>
-                </div>
-                <div class="w-10 h-10 bg-orange-500 rounded-lg flex items-center justify-center">
-                    <i class="fas fa-shopping-basket text-white text-sm"></i>
+    <div class="overflow-x-auto pb-1 mb-4">
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 min-w-[36rem] sm:min-w-0">
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Booking weight</p>
+                        <p class="stats-card-value leading-tight">
+                            <?= number_format($total_booking_weight, 2) ?><span class="text-[10px] font-medium text-slate-500 ml-0.5">g</span>
+                        </p>
+                        <p class="stats-metal-split">
+                            <span class="metal-seg" title="Cash booking">
+                                <i class="fas fa-wallet metal-icon-gold" aria-hidden="true"></i>
+                                <span class="metal-num"><?= number_format($stats['total_cash_booking_weight'] ?? 0, 2) ?></span><span class="metal-unit">g</span>
+                            </span>
+                            <span class="text-slate-300" aria-hidden="true">·</span>
+                            <span class="metal-seg" title="Bank booking">
+                                <i class="fas fa-university metal-icon-silver" aria-hidden="true"></i>
+                                <span class="metal-num"><?= number_format($stats['total_bank_booking_weight'] ?? 0, 2) ?></span><span class="metal-unit">g</span>
+                            </span>
+                        </p>
+                    </div>
+                    <div class="stats-icon-wrap bg-sky-100 stats-icon shrink-0">
+                        <i class="fas fa-book text-sky-600 text-xs"></i>
+                    </div>
                 </div>
             </div>
-        </div>
-        
-        <!-- Total Amount -->
-        <div class="soft-gradient-purple rounded-xl p-4 shadow-sm h-full">
-            <div class="flex items-center justify-between">
-                <div>
-                    <p class="text-xs font-medium text-purple-700 mb-1">Total Amount</p>
-                    <p class="text-lg font-bold text-purple-800 mb-0">₹<?= number_format(($stats['total_cash_booking_amount'] ?? 0) + ($stats['total_bank_booking_amount'] ?? 0), 0) ?></p>
-                    <p class="text-xs text-purple-600 mb-0">Cash: ₹<?= number_format($stats['total_cash_booking_amount'] ?? 0, 0) ?> | Bank: ₹<?= number_format($stats['total_bank_booking_amount'] ?? 0, 0) ?></p>
-                </div>
-                <div class="w-10 h-10 bg-purple-500 rounded-lg flex items-center justify-center">
-                    <i class="fas fa-coins text-white text-sm"></i>
+
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Sell weight</p>
+                        <p class="stats-card-value leading-tight">
+                            <?= number_format($stats['total_sale_weight'] ?? 0, 2) ?><span class="text-[10px] font-medium text-slate-500 ml-0.5">g</span>
+                        </p>
+                        <p class="text-[9px] font-medium text-slate-400 uppercase tracking-tight mt-0.5">Gold sold today</p>
+                    </div>
+                    <div class="stats-icon-wrap bg-emerald-100 stats-icon shrink-0">
+                        <i class="fas fa-shopping-cart text-emerald-600 text-xs"></i>
+                    </div>
                 </div>
             </div>
-        </div>
-        
-        <!-- Amount Received -->
-        <div class="soft-gradient-teal rounded-xl p-4 shadow-sm h-full">
-            <div class="flex items-center justify-between">
-                <div>
-                    <p class="text-xs font-medium text-teal-700 mb-1">Amount Received</p>
-                    <p class="text-lg font-bold text-teal-800 mb-0">₹<?= number_format(($stats['total_cash_received'] ?? 0) + ($stats['total_bank_received'] ?? 0), 0) ?></p>
-                    <p class="text-xs text-teal-600 mb-0">Cash: ₹<?= number_format($stats['total_cash_received'] ?? 0, 0) ?> | Bank: ₹<?= number_format($stats['total_bank_received'] ?? 0, 0) ?></p>
+
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Purchase weight</p>
+                        <p class="stats-card-value leading-tight">
+                            <?= number_format($stats['total_purchase_weight'] ?? 0, 2) ?><span class="text-[10px] font-medium text-slate-500 ml-0.5">g</span>
+                        </p>
+                        <p class="text-[9px] font-medium text-slate-400 uppercase tracking-tight mt-0.5">Gold purchased today</p>
+                    </div>
+                    <div class="stats-icon-wrap bg-amber-100 stats-icon shrink-0">
+                        <i class="fas fa-shopping-basket text-amber-700 text-xs"></i>
+                    </div>
                 </div>
-                <div class="w-10 h-10 bg-teal-500 rounded-lg flex items-center justify-center">
-                    <i class="fas fa-money-bill-wave text-white text-sm"></i>
+            </div>
+
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Total amount</p>
+                        <p class="stats-card-value leading-tight">₹<?= number_format($total_booking_amount, 0) ?></p>
+                        <p class="stats-metal-split">
+                            <span class="metal-seg" title="Cash amount">
+                                <i class="fas fa-wallet metal-icon-gold" aria-hidden="true"></i>
+                                <span class="metal-num">₹<?= number_format($stats['total_cash_booking_amount'] ?? 0, 0) ?></span>
+                            </span>
+                            <span class="text-slate-300" aria-hidden="true">·</span>
+                            <span class="metal-seg" title="Bank amount">
+                                <i class="fas fa-university metal-icon-silver" aria-hidden="true"></i>
+                                <span class="metal-num">₹<?= number_format($stats['total_bank_booking_amount'] ?? 0, 0) ?></span>
+                            </span>
+                        </p>
+                    </div>
+                    <div class="stats-icon-wrap bg-violet-100 stats-icon shrink-0">
+                        <i class="fas fa-coins text-violet-600 text-xs"></i>
+                    </div>
+                </div>
+            </div>
+
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Amount received</p>
+                        <p class="stats-card-value leading-tight">₹<?= number_format($total_received_amount, 0) ?></p>
+                        <p class="stats-metal-split">
+                            <span class="metal-seg" title="Cash received">
+                                <i class="fas fa-wallet metal-icon-gold" aria-hidden="true"></i>
+                                <span class="metal-num">₹<?= number_format($stats['total_cash_received'] ?? 0, 0) ?></span>
+                            </span>
+                            <span class="text-slate-300" aria-hidden="true">·</span>
+                            <span class="metal-seg" title="Bank received">
+                                <i class="fas fa-university metal-icon-silver" aria-hidden="true"></i>
+                                <span class="metal-num">₹<?= number_format($stats['total_bank_received'] ?? 0, 0) ?></span>
+                            </span>
+                        </p>
+                    </div>
+                    <div class="stats-icon-wrap bg-teal-100 stats-icon shrink-0">
+                        <i class="fas fa-arrow-up text-teal-600 text-xs"></i>
+                    </div>
                 </div>
             </div>
         </div>
@@ -905,109 +893,154 @@ try {
     <!-- Main Form and List Layout -->
     <div class="flex flex-col lg:flex-row gap-6">
         <!-- Left Side - Booking Form -->
-        <div class="bg-white rounded-lg shadow-md border border-gray-200" style="flex: 0 0 55%;">
-            <div class="bg-gradient-to-r from-blue-500 to-blue-600 px-4 py-2 rounded-t-lg">
-                <h2 class="text-base font-semibold text-white flex items-center">
-                    <i class="fas fa-book mr-2"></i>
-                    Book Gold Transaction
-                </h2>
-            </div>
-            <div class="p-3">
-                <form id="bookingForm" onsubmit="return false;" class="space-y-3">
-                    <input type="hidden" name="action" value="save_booking">
-                    <input type="hidden" name="party_id" id="partyId">
-                    
-                    <!-- Row 1: Booking ID & Date -->
-                    <div class="grid grid-cols-2 gap-3">
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Booking ID</label>
-                            <div class="relative">
-                                <input type="text" class="block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 cursor-pointer" name="receipt_id" readonly id="bookingIdInput" tabindex="0">
-                                <button type="button" class="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600" id="showBookingListBtn">
-                                    <i class="fas fa-history"></i>
-                                </button>
-                            </div>
-                            <div id="bookingList" class="absolute z-10 mt-1 bg-white border border-gray-200 rounded-lg shadow-xl max-h-64 overflow-y-auto hidden" style="width: 400px; max-width: 90vw;"></div>
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Date</label>
-                            <input type="datetime-local" class="block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" name="date_of_transaction" required>
-                        </div>
-                    </div>
-                    
-                    <!-- Row 2: Party Name -->
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">Party Name</label>
+        <div style="flex: 0 0 55%;">
+            <form id="bookingForm" onsubmit="return false;" class="bg-white rounded-lg shadow-md border border-gray-200 overflow-hidden">
+                <input type="hidden" name="action" value="save_booking">
+                <input type="hidden" name="party_id" id="partyId">
+
+                <!-- Section 1: Transaction Details -->
+                <div class="bg-blue-50 px-3 py-1 border-b border-blue-100">
+                    <h3 class="text-xs font-bold text-blue-800 flex items-center">
+                        <i class="fas fa-file-invoice mr-1.5 text-xs"></i> Transaction Details
+                    </h3>
+                </div>
+                <div class="p-2 grid grid-cols-12 gap-1.5">
+                    <div class="relative col-span-3">
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Booking ID</label>
                         <div class="relative">
-                            <input type="text" class="block w-full pl-3 pr-20 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" name="party_name" id="partyNameInput" required autocomplete="off" placeholder="Enter party name...">
-                            <div class="absolute inset-y-0 right-0 flex items-center pr-2">
-                                <button type="button" class="px-3 py-1 text-sm bg-blue-500 text-white rounded-lg hover:bg-blue-600" id="addNewPartyBtn" title="Add New Party (Alt+A)">
-                                    <i class="fas fa-plus mr-1"></i>New <span class="text-xs opacity-75">(Alt+A)</span>
-                                </button>
-                            </div>
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-gray-500">
+                                <i class="fas fa-hashtag text-xs"></i>
+                            </span>
+                            <input type="text" class="block w-full pl-7 pr-7 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-blue-400 focus:border-blue-400 compact-input cursor-pointer" name="receipt_id" readonly id="bookingIdInput" tabindex="0">
+                            <button type="button" class="absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-blue-600" id="showBookingListBtn" title="Recent bookings">
+                                <i class="fas fa-history text-xs"></i>
+                            </button>
                         </div>
-                        <div id="partyList" class="mt-2 hidden bg-white border border-gray-200 rounded-lg shadow-xl max-h-64 overflow-y-auto"></div>
+                        <div id="bookingList" class="hidden absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-xl max-h-60 overflow-y-auto"></div>
                     </div>
-                    
-                    <!-- Row 3: Weight & Purity -->
-                    <div class="grid grid-cols-2 gap-3">
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Weight (g)</label>
-                            <input type="number" step="0.001" class="block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" name="booking_weight" required placeholder="0.000">
+
+                    <div class="relative col-span-3">
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Date</label>
+                        <div class="relative">
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-purple-500">
+                                <i class="fas fa-calendar-alt text-xs"></i>
+                            </span>
+                            <input type="datetime-local" class="block w-full pl-7 pr-1 py-1.5 text-[11px] font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-purple-400 focus:border-purple-400 compact-input" name="date_of_transaction" required>
                         </div>
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Purity (%)</label>
-                            <select class="block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" name="purity">
+                    </div>
+
+                    <div class="relative col-span-6">
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 flex items-center justify-between uppercase tracking-tighter compact-label">
+                            <span>Party Name</span>
+                            <button type="button" class="text-[10px] font-bold text-blue-600 hover:text-blue-800 normal-case tracking-normal" id="addNewPartyBtn" title="Add New Party (Alt+A)">
+                                <i class="fas fa-plus mr-0.5"></i>New
+                            </button>
+                        </label>
+                        <div class="relative">
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-blue-500">
+                                <i class="fas fa-user text-xs"></i>
+                            </span>
+                            <input type="text" class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-blue-400 focus:border-blue-400 compact-input" name="party_name" id="partyNameInput" required autocomplete="off" placeholder="Select Party">
+                        </div>
+                        <div id="partyList" class="hidden absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto"></div>
+                    </div>
+                </div>
+
+                <!-- Section 2: Booking Details -->
+                <div class="bg-blue-50 px-3 py-1 border-t border-b border-blue-100">
+                    <h3 class="text-xs font-bold text-blue-800 flex items-center">
+                        <i class="fas fa-weight mr-1.5 text-xs"></i> Booking Details
+                    </h3>
+                </div>
+                <div class="p-2 grid grid-cols-2 gap-1.5">
+                    <div>
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Weight (g)</label>
+                        <div class="relative">
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-green-600">
+                                <i class="fas fa-weight text-xs"></i>
+                            </span>
+                            <input type="number" step="0.001" class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-green-400 focus:border-green-400 compact-input" name="booking_weight" required placeholder="0.000">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Purity (%)</label>
+                        <div class="relative">
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-orange-400">
+                                <i class="fas fa-percent text-xs"></i>
+                            </span>
+                            <select class="block w-full pl-7 pr-1 py-1.5 text-[11px] font-semibold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-orange-400 focus:border-orange-400 compact-input" name="purity">
                                 <option value="99.90">Gold Coin (99.90%)</option>
                                 <option value="99.50">Gold Bar (99.50%)</option>
                                 <option value="91.60">Gold Jewelry (91.60%)</option>
                             </select>
                         </div>
                     </div>
-                    
-                    <!-- Row 4: Rate, Total & Booking Type -->
-                    <div class="grid grid-cols-3 gap-3">
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Rate (₹/g)</label>
-                            <input type="number" step="0.01" class="block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" name="rate" required placeholder="0.00">
+                </div>
+
+                <!-- Section 3: Rate & Amount -->
+                <div class="bg-emerald-50 px-3 py-1 border-t border-b border-emerald-100">
+                    <h3 class="text-xs font-bold text-emerald-800 flex items-center">
+                        <i class="fas fa-money-bill-wave mr-1.5 text-xs"></i> Rate & Amount
+                    </h3>
+                </div>
+                <div class="p-2 grid grid-cols-2 md:grid-cols-3 gap-1.5">
+                    <div>
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Rate (<?= htmlspecialchars($gold_rate_label) ?>)</label>
+                        <div class="relative">
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-orange-500">
+                                <i class="fas fa-rupee-sign text-xs"></i>
+                            </span>
+                            <input type="number" step="0.01" class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-orange-400 focus:border-orange-400 compact-input" name="rate" required placeholder="0.00">
                         </div>
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Total (₹)</label>
-                            <input type="text" class="block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg bg-gray-50" name="total_amount" readonly placeholder="₹0.00">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-bold text-green-700 mb-0.5 uppercase tracking-tighter compact-label">Total (₹)</label>
+                        <div class="relative">
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-green-600">
+                                <i class="fas fa-coins text-xs"></i>
+                            </span>
+                            <input type="text" class="block w-full pl-7 pr-2 py-1.5 text-xs font-semibold text-gray-700 bg-gray-50 border border-gray-200 rounded cursor-not-allowed compact-input" name="total_amount" readonly placeholder="₹0.00">
                         </div>
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Booking Type</label>
-                            <select class="block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500" name="booking_type" id="bookingTypeSelect">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Booking Type</label>
+                        <div class="relative">
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-gray-600">
+                                <i class="fas fa-credit-card text-xs"></i>
+                            </span>
+                            <select class="block w-full pl-7 pr-1 py-1.5 text-[11px] font-semibold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-gray-400 focus:border-gray-400 compact-input" name="booking_type" id="bookingTypeSelect">
                                 <option value="">Select Type</option>
                                 <option value="cash">Cash</option>
                                 <option value="bank" selected>Bank</option>
                             </select>
                         </div>
                     </div>
+                </div>
 
-                    <!-- Narration -->
-                    <div>
-                        <label class="block text-xs font-medium text-gray-700 mb-1">Narration (Optional)</label>
-                        <textarea class="block w-full px-2 py-1 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500" name="narration" rows="2" placeholder="Additional notes..."></textarea>
+                <!-- Footer: Narration & Buttons -->
+                <div class="bg-gray-50 p-1.5 border-t border-gray-200 grid grid-cols-1 md:grid-cols-4 gap-1.5 items-center">
+                    <div class="md:col-span-2 relative">
+                        <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-purple-500">
+                            <i class="fas fa-comment-alt text-xs"></i>
+                        </span>
+                        <input type="text" class="block w-full pl-7 pr-2 py-1.5 text-xs font-semibold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-purple-400 focus:border-purple-400 compact-input" name="narration" placeholder="Narration...">
                     </div>
-                    
-                    <!-- Submit Buttons -->
-                    <div class="flex justify-end space-x-2">
-                        <button type="button" id="submitBtn" class="px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-white font-semibold text-sm rounded transition-colors duration-200">
-                            <i class="fas fa-book mr-1"></i>Book Gold
+                    <div class="md:col-span-2 flex space-x-1">
+                        <button type="button" id="submitBtn" class="flex-1 bg-gradient-to-r from-blue-600 to-blue-700 text-white text-[10px] font-bold uppercase py-1.5 px-3 rounded shadow hover:from-blue-700 hover:to-blue-800 transition tracking-tighter">
+                            <i class="fas fa-save mr-1"></i>Book Gold
                         </button>
-                        <button type="button" id="updateBtn" class="hidden px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white font-semibold text-sm rounded transition-colors duration-200">
-                            <i class="fas fa-save mr-1"></i>Update Booking
+                        <button type="button" id="updateBtn" class="hidden flex-1 bg-gradient-to-r from-emerald-600 to-emerald-700 text-white text-[10px] font-bold uppercase py-1.5 px-3 rounded shadow hover:from-emerald-700 hover:to-emerald-800 transition tracking-tighter">
+                            <i class="fas fa-save mr-1"></i>Update
                         </button>
-                        <button type="button" id="deleteBtn" class="hidden px-4 py-2 bg-red-500 hover:bg-red-600 text-white font-semibold text-sm rounded transition-colors duration-200">
-                            <i class="fas fa-trash mr-1"></i>Delete Booking
+                        <button type="button" id="deleteBtn" class="hidden px-2.5 py-1.5 bg-gradient-to-r from-red-600 to-red-700 text-white text-[10px] font-bold rounded hover:from-red-700 hover:to-red-800 shadow-sm" title="Delete">
+                            <i class="fas fa-trash-alt"></i>
                         </button>
-                        <button type="button" id="cancelEditBtn" class="hidden px-4 py-2 bg-gray-500 hover:bg-gray-600 text-white font-semibold text-sm rounded transition-colors duration-200">
-                            <i class="fas fa-times mr-1"></i>Cancel Edit
+                        <button type="button" id="cancelEditBtn" class="hidden px-2.5 py-1.5 bg-white border border-gray-300 text-gray-700 text-[10px] font-bold rounded hover:bg-gray-50 shadow-sm" title="Cancel">
+                            <i class="fas fa-times"></i>
                         </button>
                     </div>
-                </form>
-            </div>
+                </div>
+            </form>
         </div>
         
         <!-- Immediate form submission prevention script -->
@@ -1112,88 +1145,97 @@ try {
         </script>
 
         <!-- Right Side - Transactions List -->
-        <div class="bg-white rounded-lg shadow-md border border-gray-200" style="flex: 0 0 45%; max-width: 100%; overflow: hidden;">
-            <div class="bg-gradient-to-r from-green-500 to-green-600 px-4 py-2 rounded-t-lg">
-                <h2 class="text-base font-semibold text-white flex items-center">
-                    <i class="fas fa-list mr-2"></i>
-                    Recent Transactions
-                </h2>
+        <div class="bg-white rounded-lg shadow-md border border-gray-200 flex flex-col" style="flex: 0 0 45%; max-height: calc(100vh - 12rem);">
+            <div class="bg-blue-50 px-3 py-1.5 border-b border-blue-100 rounded-t-lg shrink-0">
+                <div class="flex items-center justify-between gap-2 flex-wrap">
+                    <h2 class="text-xs font-bold text-blue-800 flex items-center shrink-0">
+                        <i class="fas fa-list mr-1.5 text-xs"></i>
+                        Recent Bookings
+                    </h2>
+                    <form method="GET" action="" id="dateRangeForm" class="flex items-center gap-1.5">
+                        <input type="date" name="start_date" id="startDate"
+                            value="<?= htmlspecialchars($start_date) ?>"
+                            class="px-1.5 py-0.5 border border-gray-200 rounded text-[10px] w-24 focus:ring-1 focus:ring-blue-400 focus:border-blue-400 bg-white font-medium"
+                            max="<?= date('Y-m-d') ?>" title="From Date">
+                        <span class="text-gray-400 text-[10px] font-bold">to</span>
+                        <input type="date" name="end_date" id="endDate"
+                            value="<?= htmlspecialchars($end_date) ?>"
+                            class="px-1.5 py-0.5 border border-gray-200 rounded text-[10px] w-24 focus:ring-1 focus:ring-blue-400 focus:border-blue-400 bg-white font-medium"
+                            max="<?= date('Y-m-d') ?>" title="To Date">
+                        <button type="submit"
+                            class="px-1.5 py-0.5 bg-blue-600 text-white text-[10px] font-bold rounded hover:bg-blue-700 transition shadow-sm"
+                            title="Apply Date Filter">
+                            <i class="fas fa-filter text-[10px]"></i>
+                        </button>
+                    </form>
+                </div>
             </div>
-            <div class="p-4">
-                <div class="overflow-x-auto" style="max-width: 100%;">
-                    <table class="w-full text-sm responsive-table" style="table-layout: fixed; width: 100%;">
-                        <thead>
-                            <tr class="bg-gray-50 border-b">
-                                <th class="text-left py-2 px-1 font-medium text-gray-700 text-sm" style="width: 25%;">ID & Date</th>
-                                <th class="text-left py-2 px-1 font-medium text-gray-700 text-sm" style="width: 25%;">Party</th>
-                                <th class="text-left py-2 px-1 font-medium text-gray-700 text-sm" style="width: 25%;">Weights (g)</th>
-                                <th class="text-left py-2 px-1 font-medium text-gray-700 text-sm" style="width: 15%;">Amount</th>
-                                <th class="text-left py-2 px-1 font-medium text-gray-700 text-sm" style="width: 10%;">Actions</th>
+            <div class="p-2 overflow-y-auto flex-1 min-h-0">
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left book-txn-table responsive-table">
+                        <thead class="bg-slate-50 border-b border-slate-100 sticky top-0 z-10">
+                            <tr>
+                                <th class="py-2 px-2 text-left text-[9px] font-bold text-slate-500 min-w-[88px]">Id</th>
+                                <th class="py-2 px-2 text-left text-[9px] font-bold text-slate-500 min-w-[64px]">Party</th>
+                                <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500">Weight</th>
+                                <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500">Rate</th>
+                                <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500">Amount</th>
+                                <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500 w-14">Action</th>
                             </tr>
                         </thead>
-                        <tbody>
+                        <tbody class="divide-y divide-gray-100" id="recentTransactionList">
                             <?php if (empty($transactions)): ?>
                                 <tr>
-                                    <td colspan="5" class="text-center py-8 text-gray-500">
-                                        <i class="fas fa-inbox text-2xl mb-2"></i><br>
-                                        No transactions found
+                                    <td colspan="6" class="text-center py-8 text-gray-500 text-xs">
+                                        <i class="fas fa-inbox text-xl mb-2 block"></i>
+                                        No bookings found
                                     </td>
                                 </tr>
                             <?php else: ?>
                                 <?php foreach ($transactions as $t): ?>
-                                    <tr class="border-b hover:bg-gray-50 cursor-pointer selectable-row" data-receipt-id="<?= $t['receipt_id'] ?>" data-transaction="<?= base64_encode(json_encode($t)) ?>">
-                                        <td class="py-2 px-1">
-                                            <div class="flex items-center">
-                                                <input type="radio" name="selected_transaction" value="<?= $t['receipt_id'] ?>" class="mr-1 transaction-radio">
-                                                <?php if ($t['transaction_type'] === 'Received'): ?>
-                                                    <span class="bg-green-500 text-white text-xs px-1.5 py-0.5 rounded-full mr-1 font-bold">R</span>
-                                                <?php else: ?>
-                                                    <span class="bg-blue-500 text-white text-xs px-1.5 py-0.5 rounded-full mr-1 font-bold">B</span>
-                                                <?php endif; ?>
-                                                <div>
-                                                    <div class="font-mono text-sm font-bold text-gray-900"><?= htmlspecialchars($t['receipt_id']) ?></div>
-                                                    <div class="text-xs text-gray-500 border-b border-gray-300 pb-0.5"><?= date('d M Y', strtotime($t['date_of_transaction'])) ?></div>
-                                                </div>
+                                    <tr class="hover:bg-slate-50 transition-colors border-b border-slate-100 last:border-b-0 cursor-pointer selectable-row group"
+                                        data-receipt-id="<?= htmlspecialchars($t['receipt_id']) ?>"
+                                        data-transaction="<?= base64_encode(json_encode($t)) ?>">
+                                        <td class="py-1.5 px-2 align-top min-w-[88px]">
+                                            <div class="text-[10px] font-bold text-blue-600 group-hover:underline leading-tight font-mono break-all">
+                                                #<?= htmlspecialchars($t['receipt_id']) ?>
+                                            </div>
+                                            <div class="text-[8px] font-bold text-slate-400 uppercase leading-tight mt-0.5 flex items-center gap-1">
+                                                <span class="text-blue-500">B</span>
+                                                <span><?= date('d M', strtotime($t['date_of_transaction'])) ?></span>
                                             </div>
                                         </td>
-                                        <td class="py-2 px-1">
-                                            <div class="font-semibold text-gray-900 text-sm"><?= htmlspecialchars($t['party_name']) ?></div>
-                                            <?php if ($t['party_contact']): ?>
-                                                <div class="text-xs text-gray-500"><?= htmlspecialchars($t['party_contact']) ?></div>
-                                            <?php endif; ?>
-                                        </td>
-                                        <td class="py-2 px-1">
-                                            <?php if ($t['transaction_type'] === 'Received'): ?>
-                                                <div class="text-left">
-                                                    <div class="font-bold text-green-600 text-sm">₹<?= number_format($t['payment_amount'], 2) ?></div>
-                                                    <div class="text-xs text-gray-600"><?= $t['payment_method'] ?? 'Cash' ?></div>
-                                                </div>
-                                            <?php else: ?>
-                                                <div class="text-left">
-                                                    <div class="font-bold text-blue-600 text-sm"><?= number_format($t['gold_weight'], 2) ?>g</div>
-                                                    <div class="text-xs text-gray-600">₹<?= number_format($t['rate'], 2) ?>/g</div>
-                                                </div>
-                                            <?php endif; ?>
-                                        </td>
-                                        <td class="py-2 px-1">
-                                            <div class="text-left">
-                                                <?php if ($t['transaction_type'] === 'Received'): ?>
-                                                    <span class="font-bold text-green-600 text-sm">₹<?= number_format($t['payment_amount'], 2) ?></span>
-                                                <?php else: ?>
-                                                    <span class="font-bold text-green-600 text-sm">₹<?= number_format($t['gold_amount'], 2) ?></span>
-                                                <?php endif; ?>
+                                        <td class="py-1.5 px-2 align-top">
+                                            <div class="text-[10px] font-semibold text-slate-800 truncate max-w-[72px] uppercase" title="<?= htmlspecialchars($t['party_name'] ?? '') ?>">
+                                                <?= htmlspecialchars($t['party_name'] ?? '') ?>
                                             </div>
                                         </td>
-                                        <td class="py-2 px-1">
-                                            <div class="flex items-center space-x-1">
-                                                <button class="text-blue-600 hover:text-blue-800 text-sm print-transaction" title="Print Receipt">
-                                                    <i class="fas fa-print"></i>
+                                        <td class="py-1.5 px-2 align-top text-right whitespace-nowrap">
+                                            <div class="text-[10px] font-bold text-slate-700 leading-none">
+                                                <?= number_format($t['gold_weight'], 3) ?><span class="text-[8px] font-normal ml-0.5">g</span>
+                                            </div>
+                                            <div class="text-[8px] font-bold text-slate-400 uppercase mt-0.5"><?= number_format($t['purity'], 2) ?>%</div>
+                                        </td>
+                                        <td class="py-1.5 px-2 align-top text-right whitespace-nowrap">
+                                            <div class="text-[10px] font-semibold text-amber-600 leading-none">@ ₹<?= number_format(gold_rate_to_display(floatval($t['rate']), $gold_rate_unit), 0) ?><span class="text-[8px] font-normal text-slate-500"><?= htmlspecialchars($gold_rate_suffix) ?></span></div>
+                                            <div class="text-[8px] font-medium text-slate-400 uppercase mt-0.5"><?= htmlspecialchars($t['booking_type'] ?? 'Cash') ?></div>
+                                        </td>
+                                        <td class="py-1.5 px-2 align-top text-right whitespace-nowrap">
+                                            <div class="text-[10px] font-bold text-slate-800 leading-none">₹<?= number_format($t['gold_amount'], 0) ?></div>
+                                            <div class="mt-0.5">
+                                                <span class="text-[7.5px] px-1 py-0.5 rounded bg-blue-100 text-blue-700 font-bold uppercase tracking-tighter"><?= htmlspecialchars($t['booking_type'] ?? 'Book') ?></span>
+                                            </div>
+                                        </td>
+                                        <td class="py-1.5 px-1 align-top">
+                                            <div class="flex items-center justify-end gap-0.5">
+                                                <button type="button" class="text-blue-500 hover:text-blue-700 p-0.5 print-transaction" title="Print">
+                                                    <i class="fas fa-print text-[9px]"></i>
                                                 </button>
-                                                <button class="text-red-600 hover:text-red-800 text-sm delete-transaction" title="Delete">
-                                                    <i class="fas fa-trash"></i>
+                                                <button type="button" class="text-red-500 hover:text-red-700 p-0.5 delete-transaction" title="Delete">
+                                                    <i class="fas fa-trash-alt text-[9px]"></i>
                                                 </button>
-                                                <button class="text-green-600 hover:text-green-800 text-sm share-transaction" title="Share">
-                                                    <i class="fas fa-share"></i>
+                                                <button type="button" class="text-green-600 hover:text-green-800 p-0.5 share-transaction" title="Share">
+                                                    <i class="fas fa-share text-[9px]"></i>
                                                 </button>
                                             </div>
                                         </td>
@@ -1203,43 +1245,30 @@ try {
                         </tbody>
                     </table>
                 </div>
-                
-                <!-- Selected Transaction Actions -->
-                <div id="selectedTransactionActions" class="hidden mt-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                    <div class="flex items-center justify-between">
-                        <div>
-                            <h3 class="text-sm font-medium text-blue-900">Selected Transaction</h3>
-                            <p id="selectedTransactionInfo" class="text-xs text-blue-700"></p>
-                        </div>
-                        <div class="flex space-x-2">
-                            <button id="printTransactionBtn" class="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white text-xs rounded transition-colors">
-                                <i class="fas fa-print mr-1"></i>Print
-                            </button>
-                            <button id="deleteTransactionBtn" class="px-3 py-1 bg-red-500 hover:bg-red-600 text-white text-xs rounded transition-colors">
-                                <i class="fas fa-trash mr-1"></i>Delete
-                            </button>
-                            <button id="clearSelectionBtn" class="px-3 py-1 bg-gray-500 hover:bg-gray-600 text-white text-xs rounded transition-colors">
-                                <i class="fas fa-times mr-1"></i>Cancel
-                            </button>
-                        </div>
-                    </div>
-                </div>
             </div>
 
             <!-- Pagination -->
+            <?php
+            $pagination_query = http_build_query(array_filter([
+                'start_date' => $start_date,
+                'end_date' => $end_date,
+                'search' => $search ?: null,
+            ]));
+            $pagination_prefix = $pagination_query ? '?' . $pagination_query . '&' : '?';
+            ?>
             <?php if ($total_pages > 1): ?>
-                <div class="flex justify-center mt-4 pb-4">
-                    <nav class="flex space-x-2">
+                <div class="flex justify-center pb-3 px-2 shrink-0 border-t border-slate-100 pt-2">
+                    <nav class="flex space-x-1">
                         <?php if ($current_page > 1): ?>
-                            <a href="?page=<?= $current_page - 1 ?><?= $search ? '&search=' . urlencode($search) : '' ?>" class="px-3 py-1 bg-gray-200 text-gray-700 rounded hover:bg-gray-300">Previous</a>
+                            <a href="<?= $pagination_prefix ?>page=<?= $current_page - 1 ?>" class="px-2 py-0.5 bg-gray-100 text-gray-700 text-[10px] font-bold rounded hover:bg-gray-200">Prev</a>
                         <?php endif; ?>
                         
                         <?php for ($i = max(1, $current_page - 2); $i <= min($total_pages, $current_page + 2); $i++): ?>
-                            <a href="?page=<?= $i ?><?= $search ? '&search=' . urlencode($search) : '' ?>" class="px-3 py-1 <?= $i === $current_page ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300' ?> rounded"><?= $i ?></a>
+                            <a href="<?= $pagination_prefix ?>page=<?= $i ?>" class="px-2 py-0.5 text-[10px] font-bold rounded <?= $i === $current_page ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200' ?>"><?= $i ?></a>
                         <?php endfor; ?>
                         
                         <?php if ($current_page < $total_pages): ?>
-                            <a href="?page=<?= $current_page + 1 ?><?= $search ? '&search=' . urlencode($search) : '' ?>" class="px-3 py-1 bg-gray-200 text-gray-700 rounded hover:bg-gray-300">Next</a>
+                            <a href="<?= $pagination_prefix ?>page=<?= $current_page + 1 ?>" class="px-2 py-0.5 bg-gray-100 text-gray-700 text-[10px] font-bold rounded hover:bg-gray-200">Next</a>
                         <?php endif; ?>
                     </nav>
                 </div>
@@ -1251,46 +1280,111 @@ try {
 <?php include 'components/footer.php'; ?>
 
 <style>
-/* Responsive font sizing for table */
-@media (max-width: 768px) {
-    .responsive-table th,
-    .responsive-table td {
-        font-size: 0.75rem !important;
-        padding: 0.25rem 0.125rem !important;
-    }
-    .responsive-table .font-bold {
-        font-size: 0.75rem !important;
-    }
-    .responsive-table .font-semibold {
-        font-size: 0.75rem !important;
-    }
+/* Stats cards (match exchange.php) */
+.stats-card-label {
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    color: rgb(100 116 139);
 }
 
-@media (min-width: 769px) and (max-width: 1024px) {
-    .responsive-table th,
-    .responsive-table td {
-        font-size: 0.875rem !important;
-        padding: 0.375rem 0.25rem !important;
-    }
-    .responsive-table .font-bold {
-        font-size: 0.875rem !important;
-    }
-    .responsive-table .font-semibold {
-        font-size: 0.875rem !important;
-    }
+.stats-card-value {
+    font-size: 1rem;
+    font-weight: 600;
+    color: rgb(51 65 85);
+    font-variant-numeric: tabular-nums;
 }
 
-@media (min-width: 1025px) {
-    .responsive-table th,
-    .responsive-table td {
-        font-size: 0.875rem !important;
-        padding: 0.5rem 0.25rem !important;
+.stats-metal-split {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.15rem 0.45rem;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    line-height: 1.35;
+    margin-top: 0.35rem;
+    font-variant-numeric: tabular-nums;
+    color: rgb(71 85 105);
+}
+
+.stats-metal-split .metal-seg {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+}
+
+.stats-metal-split .metal-num {
+    font-weight: 700;
+    font-size: 0.6875rem;
+}
+
+.stats-metal-split .metal-unit {
+    font-size: 0.625rem;
+    font-weight: 600;
+    color: rgb(100 116 139);
+}
+
+.stats-metal-split .metal-icon-gold {
+    color: #b45309;
+    font-size: 0.625rem;
+}
+
+.stats-metal-split .metal-icon-silver {
+    color: #475569;
+    font-size: 0.625rem;
+}
+
+.stats-icon-wrap {
+    width: 2rem;
+    height: 2rem;
+    border-radius: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Compact form styles */
+#partyList {
+    position: absolute !important;
+    top: 100% !important;
+    left: 0 !important;
+    right: 0 !important;
+    width: 100% !important;
+    z-index: 1000 !important;
+}
+
+/* Transaction list — keep compact sizes */
+.book-txn-table {
+    color: rgb(100 116 139);
+    font-size: 10px;
+}
+
+.book-txn-table th,
+.book-txn-table td {
+    vertical-align: top;
+}
+
+@media (max-width: 1600px) {
+    .compact-label {
+        font-size: 0.65rem !important;
+        margin-bottom: 0.1rem !important;
     }
-    .responsive-table .font-bold {
-        font-size: 0.875rem !important;
+
+    .compact-input {
+        padding-top: 0.4rem !important;
+        padding-bottom: 0.4rem !important;
+        font-size: 0.75rem !important;
     }
-    .responsive-table .font-semibold {
-        font-size: 0.875rem !important;
+
+    .stats-card {
+        padding: 0.6rem !important;
+    }
+
+    .stats-icon {
+        width: 1.75rem !important;
+        height: 1.75rem !important;
     }
 }
 
@@ -1382,8 +1476,32 @@ include 'components/layout.php';
 <script>
     window.companyId = <?= $company_id ?>;
     window.companyName = <?= json_encode($company_name ?: 'Gold Trading Company') ?>;
+    window.GOLD_RATE_CONFIG = <?= json_encode(gold_rate_js_config($gold_rate_unit)) ?>;
 </script>
+<script src="js/gold-rate-utils.js"></script>
 <script src="js/keyboard-navigation.js"></script>
 <script src="js/book-gold.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const startDate = document.getElementById('startDate');
+    const endDate = document.getElementById('endDate');
+    if (!startDate || !endDate) return;
+
+    function validateDateRange() {
+        const start = new Date(startDate.value);
+        const end = new Date(endDate.value);
+        if (start > end) {
+            if (document.activeElement === startDate) {
+                endDate.value = startDate.value;
+            } else {
+                startDate.value = endDate.value;
+            }
+        }
+    }
+
+    startDate.addEventListener('change', validateDateRange);
+    endDate.addEventListener('change', validateDateRange);
+});
+</script>
 </body>
 

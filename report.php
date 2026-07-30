@@ -80,6 +80,19 @@ if ($stock_result) {
     }
 }
 
+$has_mix_gold_stock = false;
+$has_mix_silver_stock = false;
+foreach ($gold_stocks as $s) {
+    if (stripos($s['stock_name'], 'mix') === false) {
+        continue;
+    }
+    if ($s['category'] === 'Gold') {
+        $has_mix_gold_stock = true;
+    } elseif ($s['category'] === 'Silver') {
+        $has_mix_silver_stock = true;
+    }
+}
+
 // Total Received Weight from Exchange Transactions
 $received_weight_sql = "SELECT COALESCE(SUM(received_weight), 0) as total_received_weight 
     FROM transactions 
@@ -88,6 +101,71 @@ $received_weight_sql = "SELECT COALESCE(SUM(received_weight), 0) as total_receiv
     AND DATE(date_of_transaction) BETWEEN '$start_date' AND '$end_date'";
 $received_weight_result = $conn->query($received_weight_sql);
 $received_weight_data = $received_weight_result->fetch_assoc();
+
+// Mix stock card: exchange received in date range, split gold vs silver (exchange_items + legacy rows)
+$mix_rcv_gold = 0.0;
+$mix_rcv_silver = 0.0;
+$mix_fine_gold = 0.0;
+$mix_fine_silver = 0.0;
+
+$mix_ei_sql = "
+SELECT
+    COALESCE(SUM(CASE WHEN LOWER(TRIM(COALESCE(ei.material, 'Gold'))) = 'silver' THEN ei.weight ELSE 0 END), 0) AS s_wt,
+    COALESCE(SUM(CASE WHEN LOWER(TRIM(COALESCE(ei.material, 'Gold'))) <> 'silver' THEN ei.weight ELSE 0 END), 0) AS g_wt,
+    COALESCE(SUM(CASE WHEN LOWER(TRIM(COALESCE(ei.material, 'Gold'))) = 'silver' THEN ei.fine_weight ELSE 0 END), 0) AS s_fn,
+    COALESCE(SUM(CASE WHEN LOWER(TRIM(COALESCE(ei.material, 'Gold'))) <> 'silver' THEN ei.fine_weight ELSE 0 END), 0) AS g_fn
+FROM exchange_items ei
+INNER JOIN transactions t ON t.id = ei.transaction_id AND t.company_id = ei.company_id
+WHERE t.company_id = ?
+  AND DATE(t.date_of_transaction) BETWEEN ? AND ?
+  AND t.transaction_type = 'Exchange'
+  AND ei.item_type = 'received'";
+$mix_ei_st = $conn->prepare($mix_ei_sql);
+if ($mix_ei_st) {
+    $mix_ei_st->bind_param('iss', $company_id, $start_date, $end_date);
+    $mix_ei_st->execute();
+    $mix_ei_row = $mix_ei_st->get_result()->fetch_assoc();
+    if ($mix_ei_row) {
+        $mix_rcv_silver += (float) $mix_ei_row['s_wt'];
+        $mix_rcv_gold += (float) $mix_ei_row['g_wt'];
+        $mix_fine_silver += (float) $mix_ei_row['s_fn'];
+        $mix_fine_gold += (float) $mix_ei_row['g_fn'];
+    }
+    $mix_ei_st->close();
+}
+
+$mix_leg_sql = "
+SELECT
+    COALESCE(SUM(CASE WHEN LOWER(TRIM(COALESCE(t.exchange_material, 'Gold'))) = 'silver' THEN COALESCE(t.received_weight, 0) ELSE 0 END), 0) AS s_wt,
+    COALESCE(SUM(CASE WHEN LOWER(TRIM(COALESCE(t.exchange_material, 'Gold'))) <> 'silver' THEN COALESCE(t.received_weight, 0) ELSE 0 END), 0) AS g_wt,
+    COALESCE(SUM(CASE WHEN LOWER(TRIM(COALESCE(t.exchange_material, 'Gold'))) = 'silver' THEN COALESCE(t.fine_weight, 0) ELSE 0 END), 0) AS s_fn,
+    COALESCE(SUM(CASE WHEN LOWER(TRIM(COALESCE(t.exchange_material, 'Gold'))) <> 'silver' THEN COALESCE(t.fine_weight, 0) ELSE 0 END), 0) AS g_fn
+FROM transactions t
+WHERE t.company_id = ?
+  AND DATE(t.date_of_transaction) BETWEEN ? AND ?
+  AND t.transaction_type = 'Exchange'
+  AND NOT EXISTS (
+      SELECT 1 FROM exchange_items ei
+      WHERE ei.transaction_id = t.id AND ei.item_type = 'received'
+  )";
+$mix_leg_st = $conn->prepare($mix_leg_sql);
+if ($mix_leg_st) {
+    $mix_leg_st->bind_param('iss', $company_id, $start_date, $end_date);
+    $mix_leg_st->execute();
+    $mix_leg_row = $mix_leg_st->get_result()->fetch_assoc();
+    if ($mix_leg_row) {
+        $mix_rcv_silver += (float) $mix_leg_row['s_wt'];
+        $mix_rcv_gold += (float) $mix_leg_row['g_wt'];
+        $mix_fine_silver += (float) $mix_leg_row['s_fn'];
+        $mix_fine_gold += (float) $mix_leg_row['g_fn'];
+    }
+    $mix_leg_st->close();
+}
+
+$show_synth_mix_gold = !$has_mix_gold_stock
+    && ($has_mix_silver_stock || $mix_rcv_gold > 0.0005 || $mix_fine_gold > 0.0005);
+$show_synth_mix_silver = !$has_mix_silver_stock
+    && ($has_mix_gold_stock || $mix_rcv_silver > 0.0005 || $mix_fine_silver > 0.0005);
 
 $page_title = "Daily Report";
 ob_start();
@@ -99,12 +177,12 @@ ob_start();
     <!-- Ultra-Compact Stats Grid (Full Width) -->
     <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-2 mb-4">
         <!-- Cash Balance -->
-        <div class="bg-white rounded border border-gray-100 p-2 shadow-sm">
+        <div class="rounded-lg border border-emerald-200/90 bg-gradient-to-br from-emerald-50 via-white to-white p-2 shadow-sm">
             <div class="flex flex-col">
-                <div class="flex items-center justify-between">
-                    <p class="text-[8px] font-bold text-gray-400 uppercase tracking-tighter">Cash In Hand</p>
+                <div class="flex items-center justify-between gap-1">
+                    <p class="text-[8px] font-medium text-emerald-800/80 uppercase tracking-wide">Cash In Hand</p>
                     <div class="relative">
-                        <button onclick="toggleDropdown('cash-dropdown')" class="text-gray-300 hover:text-gray-500">
+                        <button onclick="toggleDropdown('cash-dropdown')" class="text-emerald-400 hover:text-emerald-600">
                             <i class="fas fa-ellipsis-v text-[8px]"></i>
                         </button>
                         <div id="cash-dropdown" class="hidden absolute right-0 mt-1 w-32 bg-white rounded shadow-lg z-10 border border-gray-100 py-1">
@@ -114,20 +192,22 @@ ob_start();
                         </div>
                     </div>
                 </div>
-                <div class="flex items-center justify-between mt-0.5">
-                    <p class="text-xs font-black text-slate-800 tracking-tighter">₹<?= number_format($balance_data['cash_balance'] ?? 0) ?></p>
-                    <i class="fas fa-money-bill-wave text-green-500 text-[10px] opacity-20"></i>
+                <div class="flex items-center justify-between mt-1">
+                    <p class="text-xs font-semibold text-emerald-900 tabular-nums">₹<?= number_format($balance_data['cash_balance'] ?? 0) ?></p>
+                    <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-emerald-100 text-emerald-700">
+                        <i class="fas fa-money-bill-wave text-[11px]"></i>
+                    </span>
                 </div>
             </div>
         </div>
 
         <!-- Bank Balance -->
-        <div class="bg-white rounded border border-gray-100 p-2 shadow-sm">
+        <div class="rounded-lg border border-sky-200/90 bg-gradient-to-br from-sky-50 via-white to-white p-2 shadow-sm">
             <div class="flex flex-col">
-                <div class="flex items-center justify-between">
-                    <p class="text-[8px] font-bold text-gray-400 uppercase tracking-tighter">Bank Balance</p>
+                <div class="flex items-center justify-between gap-1">
+                    <p class="text-[8px] font-medium text-sky-800/80 uppercase tracking-wide">Bank Balance</p>
                     <div class="relative">
-                        <button onclick="toggleDropdown('bank-dropdown')" class="text-gray-300 hover:text-gray-500">
+                        <button onclick="toggleDropdown('bank-dropdown')" class="text-sky-400 hover:text-sky-600">
                             <i class="fas fa-ellipsis-v text-[8px]"></i>
                         </button>
                         <div id="bank-dropdown" class="hidden absolute right-0 mt-1 w-32 bg-white rounded shadow-lg z-10 border border-gray-100 py-1">
@@ -137,9 +217,11 @@ ob_start();
                         </div>
                     </div>
                 </div>
-                <div class="flex items-center justify-between mt-0.5">
-                    <p class="text-xs font-black text-slate-800 tracking-tighter">₹<?= number_format($balance_data['bank_balance'] ?? 0) ?></p>
-                    <i class="fas fa-university text-blue-500 text-[10px] opacity-20"></i>
+                <div class="flex items-center justify-between mt-1">
+                    <p class="text-xs font-semibold text-sky-900 tabular-nums">₹<?= number_format($balance_data['bank_balance'] ?? 0) ?></p>
+                    <span class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-sky-100 text-sky-700">
+                        <i class="fas fa-university text-[11px]"></i>
+                    </span>
                 </div>
             </div>
         </div>
@@ -151,22 +233,27 @@ ob_start();
                     $is_gold = $stock['category'] === 'Gold';
                     $is_cash = $stock['mode'] === 'Cash';
                     $is_positive = $stock['current_stock'] >= 0;
+                    $is_mix_stock = (stripos($stock['stock_name'], 'mix') !== false);
                     
-                    $metal_color = $is_gold ? 'text-amber-600' : 'text-slate-500';
-                    $metal_bg = $is_gold ? 'bg-amber-50' : 'bg-slate-50';
-                    $mode_color = $is_cash ? 'text-green-600' : 'text-blue-600';
+                    $metal_color = $is_gold ? 'text-amber-700/90' : 'text-slate-600';
+                    $metal_bg = $is_gold ? 'bg-amber-100/60' : 'bg-slate-100/80';
+                    $mode_color = $is_cash ? 'text-emerald-700/80' : 'text-sky-700/80';
                     $mode_label = $is_cash ? 'K' : 'P';
-                    $status_color = $is_positive ? 'text-emerald-600' : 'text-red-600';
+                    $status_color = $is_positive ? 'text-emerald-700' : 'text-red-600';
                 ?>
-                <div class="bg-white rounded border border-gray-100 p-2 shadow-sm">
+                <div class="bg-white rounded-lg border border-slate-200/70 p-2 shadow-sm relative">
                     <div class="flex flex-col">
-                        <div class="flex justify-between items-start">
-                            <div class="flex items-center gap-1">
-                                <span class="text-[7px] px-1 py-0 rounded font-bold uppercase tracking-tighter <?= $metal_bg ?> <?= $metal_color ?>"><?= substr($stock['category'], 0, 1) ?></span>
-                                <span class="text-[7px] px-1 py-0 rounded font-bold uppercase tracking-tighter bg-gray-100 <?= $mode_color ?>"><?= $mode_label ?></span>
-                                <p class="text-[8px] font-bold text-slate-500 uppercase truncate max-w-[50px]"><?= htmlspecialchars($stock['stock_name']) ?></p>
+                        <div class="flex justify-between items-center gap-1">
+                            <div class="flex items-center gap-1 min-w-0 flex-1">
+                                <span class="text-[7px] px-1 py-0 rounded font-medium uppercase tracking-wide <?= $metal_bg ?> <?= $metal_color ?>"><?= substr($stock['category'], 0, 1) ?></span>
+                                <span class="text-[7px] px-1 py-0 rounded font-medium uppercase tracking-wide bg-slate-100 <?= $mode_color ?>"><?= $mode_label ?></span>
+                                <?php if ($is_mix_stock): ?>
+                                <p class="text-[8px] font-bold <?= $is_gold ? 'text-amber-800' : 'text-slate-700' ?> uppercase truncate" title="<?= $is_gold ? 'Mix stock gold' : 'Mix stock silver' ?>"><?= $is_gold ? 'Mix gold' : 'Mix silver' ?></p>
+                                <?php else: ?>
+                                <p class="text-[8px] font-medium text-slate-600 uppercase truncate max-w-[50px]"><?= htmlspecialchars($stock['stock_name']) ?></p>
+                                <?php endif; ?>
                             </div>
-                            <button onclick="toggleDropdown('stock-dropdown-<?= $stock['id'] ?>')" class="text-gray-300 hover:text-gray-500">
+                            <button onclick="toggleDropdown('stock-dropdown-<?= $stock['id'] ?>')" class="text-gray-300 hover:text-gray-500 shrink-0" type="button" aria-label="Stock actions">
                                 <i class="fas fa-ellipsis-v text-[8px]"></i>
                             </button>
                             <div id="stock-dropdown-<?= $stock['id'] ?>" class="hidden absolute right-0 mt-1 w-32 bg-white rounded shadow-lg z-10 border border-gray-100 p-1">
@@ -175,15 +262,84 @@ ob_start();
                                 <button onclick="openResetStockModal(<?= $stock['id'] ?>, '<?= htmlspecialchars($stock['stock_name']) ?>', <?= $stock['purity'] ?>)" class="block w-full text-left px-2 py-1 text-[9px] font-bold text-red-600 hover:bg-red-50">Reset</button>
                             </div>
                         </div>
-                        <div class="flex items-baseline justify-between mt-0.5">
-                            <p class="text-xs font-black <?= $status_color ?> tracking-tighter">
-                                <?= number_format(abs($stock['current_stock']), 3) ?><span class="text-[9px] font-normal opacity-70 ml-0.5">g</span>
+                        <div class="flex items-end justify-between gap-2 mt-1">
+                            <?php if ($is_mix_stock): ?>
+                            <?php
+                                $mix_side_gold = $is_gold;
+                                $mix_line_rcv = $mix_side_gold ? $mix_rcv_gold : $mix_rcv_silver;
+                                $mix_line_fn = $mix_side_gold ? $mix_fine_gold : $mix_fine_silver;
+                            ?>
+                            <div class="min-w-0 flex-1">
+                                <p class="text-xs font-semibold text-emerald-700 tabular-nums leading-none">
+                                    <span class="text-[9px] font-medium text-slate-500 normal-case mr-1">Rcv</span><?= number_format($mix_line_rcv, 3) ?><span class="text-[9px] font-normal text-slate-500 ml-0.5">g</span>
+                                </p>
+                                <p class="text-xs font-semibold text-emerald-700 tabular-nums leading-tight mt-1">
+                                    <span class="text-[9px] font-medium text-slate-500 normal-case mr-1">Fine</span><?= number_format($mix_line_fn, 3) ?><span class="text-[9px] font-normal text-slate-500 ml-0.5">g</span>
+                                </p>
+                            </div>
+                            <span class="text-[8px] text-slate-400 font-medium shrink-0 self-end tabular-nums min-w-[2rem] text-right" title="Purity not used for mix (period exchange received)">—</span>
+                            <?php else: ?>
+                            <p class="text-xs font-semibold <?= $status_color ?> tabular-nums">
+                                <?= number_format(abs($stock['current_stock']), 3) ?><span class="text-[9px] font-normal text-slate-500 ml-0.5">g</span>
                             </p>
-                            <span class="text-[8px] text-gray-400 font-bold"><?= number_format($stock['purity'], 1) ?>%</span>
+                            <span class="text-[8px] text-slate-400 font-medium shrink-0"><?= number_format($stock['purity'], 1) ?>%</span>
+                            <?php endif; ?>
                         </div>
                     </div>
                 </div>
             <?php endforeach; ?>
+        <?php endif; ?>
+
+        <?php if ($show_synth_mix_gold): ?>
+        <div class="bg-white rounded-lg border border-dashed border-amber-200/80 p-2 shadow-sm relative">
+            <div class="flex flex-col">
+                <div class="flex justify-between items-center gap-1">
+                    <div class="flex items-center gap-1 min-w-0 flex-1">
+                        <span class="text-[7px] px-1 py-0 rounded font-medium uppercase tracking-wide bg-amber-100/60 text-amber-700/90">G</span>
+                        <span class="text-[7px] px-1 py-0 rounded font-medium uppercase tracking-wide bg-slate-100 text-emerald-700/80">K</span>
+                        <p class="text-[8px] font-bold text-amber-800 uppercase truncate">Mix gold</p>
+                    </div>
+                    <span class="inline-block w-3 shrink-0" aria-hidden="true"></span>
+                </div>
+                <div class="flex items-end justify-between gap-2 mt-1">
+                    <div class="min-w-0 flex-1">
+                        <p class="text-xs font-semibold text-emerald-700 tabular-nums leading-none">
+                            <span class="text-[9px] font-medium text-slate-500 normal-case mr-1">Rcv</span><?= number_format($mix_rcv_gold, 3) ?><span class="text-[9px] font-normal text-slate-500 ml-0.5">g</span>
+                        </p>
+                        <p class="text-xs font-semibold text-emerald-700 tabular-nums leading-tight mt-1">
+                            <span class="text-[9px] font-medium text-slate-500 normal-case mr-1">Fine</span><?= number_format($mix_fine_gold, 3) ?><span class="text-[9px] font-normal text-slate-500 ml-0.5">g</span>
+                        </p>
+                    </div>
+                    <span class="text-[8px] text-slate-400 font-medium shrink-0 self-end tabular-nums min-w-[2rem] text-right" title="Placeholder card">—</span>
+                </div>
+            </div>
+        </div>
+        <?php endif; ?>
+
+        <?php if ($show_synth_mix_silver): ?>
+        <div class="bg-white rounded-lg border border-dashed border-slate-300/80 p-2 shadow-sm relative">
+            <div class="flex flex-col">
+                <div class="flex justify-between items-center gap-1">
+                    <div class="flex items-center gap-1 min-w-0 flex-1">
+                        <span class="text-[7px] px-1 py-0 rounded font-medium uppercase tracking-wide bg-slate-100/80 text-slate-600">S</span>
+                        <span class="text-[7px] px-1 py-0 rounded font-medium uppercase tracking-wide bg-slate-100 text-emerald-700/80">K</span>
+                        <p class="text-[8px] font-bold text-slate-700 uppercase truncate">Mix silver</p>
+                    </div>
+                    <span class="inline-block w-3 shrink-0" aria-hidden="true"></span>
+                </div>
+                <div class="flex items-end justify-between gap-2 mt-1">
+                    <div class="min-w-0 flex-1">
+                        <p class="text-xs font-semibold text-emerald-700 tabular-nums leading-none">
+                            <span class="text-[9px] font-medium text-slate-500 normal-case mr-1">Rcv</span><?= number_format($mix_rcv_silver, 3) ?><span class="text-[9px] font-normal text-slate-500 ml-0.5">g</span>
+                        </p>
+                        <p class="text-xs font-semibold text-emerald-700 tabular-nums leading-tight mt-1">
+                            <span class="text-[9px] font-medium text-slate-500 normal-case mr-1">Fine</span><?= number_format($mix_fine_silver, 3) ?><span class="text-[9px] font-normal text-slate-500 ml-0.5">g</span>
+                        </p>
+                    </div>
+                    <span class="text-[8px] text-slate-400 font-medium shrink-0 self-end tabular-nums min-w-[2rem] text-right" title="Purity not used for mix">—</span>
+                </div>
+            </div>
+        </div>
         <?php endif; ?>
     </div>
         

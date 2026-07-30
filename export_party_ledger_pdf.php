@@ -8,142 +8,51 @@ if (!isset($_SESSION['user_id'])) {
 
 // Load database configuration
 require_once __DIR__ . '/config/database.php';
+require_once __DIR__ . '/helpers/party_ledger_helper.php';
 
 // Include TCPDF library
 require_once(__DIR__ . '/tcpdf/tcpdf.php');
 
 // Get party_id from request
 $party_id = isset($_GET['party_id']) ? intval($_GET['party_id']) : 0;
-$company_id = $_SESSION['company_id'];
+$company_id = (int) $_SESSION['company_id'];
 
 if ($party_id <= 0) {
     die('Invalid party ID');
 }
 
-// Get party basic info
-$party_sql = "SELECT * FROM parties WHERE id = $party_id AND company_id = $company_id";
-$party_result = $conn->query($party_sql);
-$party_data = $party_result->fetch_assoc();
-
-if (!$party_data) {
-    die('Party not found');
+try {
+    $ledger = party_ledger_fetch_full($conn, $company_id, $party_id);
+} catch (RuntimeException $e) {
+    die($e->getMessage());
 }
 
-// Get all transactions for this party - order by date ascending for Tally-style ledger
-$transactions_sql = "SELECT * FROM transactions 
-                   WHERE party_id = $party_id AND company_id = $company_id 
-                   ORDER BY date_of_transaction ASC, id ASC";
-$transactions_result = $conn->query($transactions_sql);
-$transactions = [];
+$party_data = $ledger['party'];
+$summary = $ledger['summary'];
 
-while ($row = $transactions_result->fetch_assoc()) {
-    $transactions[] = $row;
-}
+// PDF renders Tally-style, oldest first — API/screen order is newest first.
+$display_transactions = array_reverse($ledger['transactions']);
 
-// Calculate summary with Cash/Bank breakdown
-$booked_weight = 0;
-$sold_weight = 0;
-$purchase_weight = 0;
-$booked_weight_cash = 0;
-$sold_weight_cash = 0;
-$purchase_weight_cash = 0;
-$booked_weight_bank = 0;
-$sold_weight_bank = 0;
-$purchase_weight_bank = 0;
-$booked_amount = 0;
-$cash_received = 0;
-$bank_received = 0;
-$purchase_cash_paid = 0;
-$purchase_bank_paid = 0;
-$total_paid_out = 0;
-$total_purchase_paid = 0; // Total amount paid for purchases
+$booked_weight = $summary['booked_weight'];
+$booked_weight_cash = $summary['booked_weight_cash'];
+$booked_weight_bank = $summary['booked_weight_bank'];
+$sold_weight = $summary['sold_weight'];
+$sold_weight_cash = $summary['sold_weight_cash'];
+$sold_weight_bank = $summary['sold_weight_bank'];
+$purchase_weight = $summary['purchased_weight'];
+$purchase_weight_cash = $summary['purchased_weight_cash'];
+$purchase_weight_bank = $summary['purchased_weight_bank'];
+$cash_received = $summary['cash_received'];
+$bank_received = $summary['bank_received'];
+$total_received = $summary['total_received'];
+$cash_balance = $summary['cash_balance'];
+$bank_balance = $summary['bank_balance'];
+$current_balance = $summary['current_balance'];
 
-foreach ($transactions as $trans) {
-    switch ($trans['transaction_type']) {
-        case 'Booking':
-            $booked_weight += $trans['gold_weight'];
-            $booked_amount += $trans['gold_amount'];
-            // Booking type breakdown
-            if (isset($trans['booking_type']) && $trans['booking_type'] == 'Cash') {
-                $booked_weight_cash += $trans['gold_weight'];
-            } elseif (isset($trans['booking_type']) && $trans['booking_type'] == 'Bank') {
-                $booked_weight_bank += $trans['gold_weight'];
-            }
-            break;
-        case 'Sale':
-            $sold_weight += $trans['gold_weight'];
-            // Sale type breakdown
-            if (isset($trans['booking_type']) && $trans['booking_type'] == 'Cash') {
-                $sold_weight_cash += $trans['gold_weight'];
-            } elseif (isset($trans['booking_type']) && $trans['booking_type'] == 'Bank') {
-                $sold_weight_bank += $trans['gold_weight'];
-            }
-            // Don't count payment from Sale transactions - payments are recorded separately in Payment/Received transactions
-            break;
-        case 'Purchase':
-            // Purchase: Company buys gold from party
-            $purchase_weight += $trans['gold_weight'];
-            // Purchase type breakdown (based on payment method)
-            if (isset($trans['payment_method']) && strtolower($trans['payment_method']) == 'cash') {
-                $purchase_weight_cash += $trans['gold_weight'];
-                $purchase_cash_paid += $trans['payment_amount'];
-            } else {
-                $purchase_weight_bank += $trans['gold_weight'];
-                $purchase_bank_paid += $trans['payment_amount'];
-            }
-            $total_purchase_paid += $trans['payment_amount'];
-            break;
-        case 'Payment':
-            if ($trans['payment_type'] == 'Payment_In') {
-                if ($trans['payment_amount'] > 0) {
-                    // Count all Payment_In transactions regardless of method
-                    if (strtolower($trans['payment_method']) == 'cash' || empty($trans['payment_method']) || $trans['payment_method'] == null) {
-                        $cash_received += $trans['payment_amount'];
-                    } else {
-                        $bank_received += $trans['payment_amount'];
-                    }
-                }
-            } else {
-                // Payment_Out: Company pays party
-                $total_paid_out += $trans['payment_amount'];
-            }
-            break;
-        case 'Received':
-            // Received transactions are payments received from party
-            if ($trans['payment_amount'] > 0) {
-                if (strtolower($trans['payment_method']) == 'cash' || empty($trans['payment_method']) || $trans['payment_method'] == null) {
-                    $cash_received += $trans['payment_amount'];
-                } else {
-                    $bank_received += $trans['payment_amount'];
-                }
-            }
-            break;
-    }
-}
-
-$total_received = $cash_received + $bank_received;
-$total_purchase_paid_amount = $purchase_cash_paid + $purchase_bank_paid;
-$current_balance = floatval($party_data['current_balance'] ?? 0);
-$cash_balance = floatval($party_data['cash_balance'] ?? 0);
-$bank_balance = floatval($party_data['bank_balance'] ?? 0);
-
-// Helper function to format Indian currency
-function formatIndianCurrency($amount) {
-    $amount = round($amount, 2);
-    $exploded = explode('.', $amount);
-    $integer = $exploded[0];
-    $decimal = isset($exploded[1]) ? $exploded[1] : '00';
-    
-    $last_three = substr($integer, -3);
-    $other_numbers = substr($integer, 0, -3);
-    
-    if ($other_numbers != '') {
-        $last_three = ',' . $last_three;
-    }
-    
-    $formatted = preg_replace("/\B(?=(\d{2})+(?!\d))/", ",", $other_numbers) . $last_three;
-    
-    return $formatted . '.' . str_pad($decimal, 2, '0', STR_PAD_RIGHT);
+/** Thin alias so the rest of this file reads naturally; single source is party_ledger_format_currency(). */
+function formatIndianCurrency($amount)
+{
+    return party_ledger_format_currency((float) $amount);
 }
 
 // Create new PDF document
@@ -310,16 +219,7 @@ $fill = false;
 $row_count = 0;
 $running_balance = 0;
 
-// Debug: Check if Purchase transactions exist
-$has_purchases = false;
-foreach ($transactions as $t) {
-    if (strtoupper($t['transaction_type']) == 'PURCHASE') {
-        $has_purchases = true;
-        break;
-    }
-}
-
-foreach ($transactions as $trans) {
+foreach ($display_transactions as $trans) {
     // Normalize transaction type for comparison
     $trans_type = strtoupper(trim($trans['transaction_type']));
     // Check if we need a new page
@@ -355,15 +255,30 @@ foreach ($transactions as $trans) {
     // Show full "Purchase" but truncate others if needed
     if ($trans_type == 'PURCHASE') {
         $type = 'Purchase';
+    } elseif ($trans_type == 'EXCHANGE') {
+        $type = 'Exchange';
     } else {
         $type = strlen($type_display) > 7 ? substr($type_display, 0, 7) : $type_display;
     }
     $receipt = $trans['receipt_id'] ? substr($trans['receipt_id'], 0, 10) : '-';
-    $weight = $trans['gold_weight'] ? number_format($trans['gold_weight'], 2) . 'g' : '-';
+    if ($trans_type === 'EXCHANGE') {
+        $recv = floatval($trans['received_weight'] ?? 0);
+        $del = floatval($trans['delivered_weight'] ?? 0);
+        $parts = [];
+        if ($recv > 0) {
+            $parts[] = 'R' . number_format($recv, 2) . 'g';
+        }
+        if ($del > 0) {
+            $parts[] = 'I' . number_format($del, 2) . 'g';
+        }
+        $weight = !empty($parts) ? implode(' ', $parts) : '-';
+    } else {
+        $weight = $trans['gold_weight'] ? number_format($trans['gold_weight'], 2) . 'g' : '-';
+    }
     
-    // Show rate for Booking, Purchase, and Sale transactions
+    // Show rate for Booking, Purchase, Sale, and Exchange transactions
     $rate = '-';
-    if (in_array($trans_type, ['BOOKING', 'PURCHASE', 'SALE']) && isset($trans['rate']) && floatval($trans['rate']) > 0) {
+    if (in_array($trans_type, ['BOOKING', 'PURCHASE', 'SALE', 'EXCHANGE']) && isset($trans['rate']) && floatval($trans['rate']) > 0) {
         $rate = 'Rs ' . formatIndianCurrency($trans['rate']);
     }
     
@@ -377,6 +292,11 @@ foreach ($transactions as $trans) {
         $amount = $trans['gold_amount'] ? 'Rs ' . formatIndianCurrency($trans['gold_amount']) : '-';
         $payment_amount_val = floatval($trans['payment_amount'] ?? 0);
         $payment = ($payment_amount_val > 0) ? 'Rs ' . formatIndianCurrency($payment_amount_val) : '-';
+    } elseif ($trans_type == 'EXCHANGE') {
+        $ex_amt = party_ledger_exchange_amount($trans);
+        $amount = $ex_amt > 0 ? 'Rs ' . formatIndianCurrency($ex_amt) : '-';
+        $payment_amount_val = floatval($trans['payment_amount'] ?? 0);
+        $payment = ($payment_amount_val > 0) ? 'Rs ' . formatIndianCurrency($payment_amount_val) : '-';
     } else {
         $amount = $trans['gold_amount'] ? 'Rs ' . formatIndianCurrency($trans['gold_amount']) : '-';
         $payment = ($trans['payment_amount'] && $trans['payment_amount'] > 0) ? 'Rs ' . formatIndianCurrency($trans['payment_amount']) : '-';
@@ -384,42 +304,8 @@ foreach ($transactions as $trans) {
     
     $method = $trans['payment_method'] ? substr($trans['payment_method'], 0, 8) : '-';
     
-    // Calculate running balance (Tally-style)
-    // Outstanding Balance = What party owes company (positive = Due) OR What company owes party (negative = Credit)
-    // Positive balance means party owes company money (Due)
-    // Negative balance means company owes party money (Credit)
-    if ($trans_type == 'BOOKING') {
-        // Booking: Party owes company money (increases positive balance)
-        $running_balance += floatval($trans['gold_amount'] ?? 0);
-    } elseif ($trans_type == 'SALE') {
-        // Sale: Company owes party money (reduces positive balance or increases negative)
-        // First subtract the sale amount (company owes party)
-        $running_balance -= floatval($trans['gold_amount'] ?? 0);
-        // Then add any payment received from sale (party pays company, reduces what company owes)
-        if (isset($trans['payment_amount']) && floatval($trans['payment_amount']) > 0) {
-            $running_balance += floatval($trans['payment_amount']);
-        }
-    } elseif ($trans_type == 'PURCHASE') {
-        // Purchase: Company buys gold from party
-        // First, the gold amount increases what company owes party (decreases balance)
-        $running_balance -= floatval($trans['gold_amount'] ?? 0);
-        // Then, payment made reduces what company owes (increases balance)
-        $purchase_payment = floatval($trans['payment_amount'] ?? 0);
-        $running_balance += $purchase_payment;
-    } elseif ($trans_type == 'PAYMENT') {
-        if (isset($trans['payment_type']) && $trans['payment_type'] == 'Payment_In' && floatval($trans['payment_amount'] ?? 0) > 0) {
-            // Payment received from party: Party pays company, reduces what party owes (decreases positive balance)
-            $running_balance -= floatval($trans['payment_amount']);
-        } else {
-            // Payment paid out (Payment_Out): Company pays party, reduces what company owes party (increases balance/decreases negative)
-            $running_balance += floatval($trans['payment_amount'] ?? 0);
-        }
-    } elseif ($trans_type == 'RECEIVED') {
-        // Received: Party pays company (same as Payment_In)
-        if (floatval($trans['payment_amount'] ?? 0) > 0) {
-            $running_balance -= floatval($trans['payment_amount']);
-        }
-    }
+    // Running balance (Exchange uses due_amount; linked PAY rows excluded from list)
+    $running_balance += party_ledger_transaction_balance_delta($trans);
     
     $pdf->Cell(22, 5.5, $date, 1, 0, 'L', $fill);
     $pdf->Cell(18, 5.5, $type, 1, 0, 'C', $fill);
@@ -452,11 +338,9 @@ $pdf->setFont('helvetica', 'B', 11);
 $pdf->SetXY(13, $box_y + 2);
 $pdf->Cell(60, 6, 'OUTSTANDING BALANCE:', 0, 0, 'L', false, '', 0, false, 'T', 'M');
 
-// Use the current_balance from parties table as it's the most accurate
-// But also verify with running balance calculation
-$final_balance = $current_balance; // Use the stored balance from parties table
-// If current_balance is 0 or not set, use running balance
-if (abs($final_balance) < 0.01) {
+// Use live party balance (cash + bank); running balance is a cross-check only
+$final_balance = $current_balance;
+if (abs($final_balance) < 0.01 && abs($running_balance) >= 0.01) {
     $final_balance = $running_balance;
 }
 

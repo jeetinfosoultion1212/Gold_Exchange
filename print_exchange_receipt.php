@@ -64,9 +64,143 @@ $created_dt = new DateTime($transaction['date_of_transaction'], new DateTimeZone
 $date = $created_dt->format('d/m/Y');
 $time = $created_dt->format('h:i A');
 
+$paymentTypeLabel = $transaction['payment_type'] === 'Payment_In' ? 'Received' : 'Paid';
+$amountVal = (float)$transaction['amount'];
+$paidVal = (float)$transaction['payment_amount'];
+$balanceVal = max(0, (float)($transaction['due_amount'] ?? ($amountVal - $paidVal)));
+
+$totalFine = 0;
+foreach ($received_items as $item) {
+    $totalFine += (float)$item['fine_weight'];
+}
+
+$h = static function ($str) {
+    return htmlspecialchars((string)($str ?? ''), ENT_QUOTES, 'UTF-8');
+};
+
+// HTML print preview (popup + browser print dialog like screenshot)
+if (!isset($_GET['format']) || $_GET['format'] !== 'pdf') {
+    header('Content-Type: text/html; charset=UTF-8');
+    ?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Receipt <?= $h($transaction['receipt_id']) ?></title>
+    <style>
+        @page { size: 80mm auto; margin: 4mm; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Courier New', Courier, monospace;
+            font-weight: bold;
+            background: #525659;
+            min-height: 100vh;
+            display: flex;
+            align-items: flex-start;
+            justify-content: center;
+            padding: 16px;
+        }
+        .receipt {
+            background: #fff;
+            width: 72mm;
+            max-width: 100%;
+            padding: 6mm 4mm;
+            color: #000;
+            font-size: 11px;
+            line-height: 1.35;
+        }
+        .center { text-align: center; }
+        .divider { border-bottom: 1.5px dashed #000; margin: 6px 0; }
+        .row { display: flex; justify-content: space-between; gap: 8px; margin: 3px 0; }
+        .label { flex: 0 0 auto; }
+        .value { text-align: right; flex: 1; }
+        table { width: 100%; border-collapse: collapse; font-size: 10px; margin: 4px 0; }
+        th, td { padding: 3px 2px; }
+        th { border-bottom: 1.5px dashed #000; text-align: right; }
+        th:first-child { text-align: center; }
+        td:first-child { text-align: center; }
+        td { text-align: right; }
+        .total-row td { border-top: 1.5px dashed #000; padding-top: 5px; font-size: 11px; }
+        .amount-big { font-size: 13px; }
+        .section-title { font-size: 10px; margin: 4px 0 2px; }
+        .footer { text-align: center; border-top: 1.5px dashed #000; padding-top: 6px; margin-top: 8px; font-size: 9px; }
+        @media print {
+            body { background: #fff; padding: 0; display: block; }
+            .receipt { width: 72mm; margin: 0 auto; padding: 0; }
+        }
+    </style>
+</head>
+<body>
+    <div class="receipt">
+        <div class="center" style="font-size:15px; margin-bottom:2px;"><?= $h($company_name) ?></div>
+        <div class="center" style="font-size:11px; margin-bottom:4px;">GOLD EXCHANGE RECEIPT</div>
+        <div class="divider"></div>
+
+        <div class="row"><span class="label">Receipt:</span><span class="value"><?= $h($transaction['receipt_id']) ?></span></div>
+        <div class="row"><span class="label">Date:</span><span class="value"><?= $h($date . ' ' . $time) ?></span></div>
+        <div class="row"><span class="label">Party:</span><span class="value"><?= $h($transaction['party_name']) ?></span></div>
+        <div class="divider"></div>
+
+        <div class="section-title">Received Items:</div>
+        <table>
+            <thead>
+                <tr>
+                    <th style="width:10%">#</th>
+                    <th style="width:30%">Wt(g)</th>
+                    <th style="width:25%">Pur%</th>
+                    <th style="width:35%">Fine(g)</th>
+                </tr>
+            </thead>
+            <tbody>
+                <?php $itemNumber = 1; foreach ($received_items as $item): ?>
+                <tr>
+                    <td><?= $itemNumber++ ?></td>
+                    <td><?= number_format((float)$item['weight'], 3) ?></td>
+                    <td><?= number_format((float)$item['purity'], 2) ?></td>
+                    <td><?= number_format((float)$item['fine_weight'], 3) ?></td>
+                </tr>
+                <?php endforeach; ?>
+                <tr class="total-row">
+                    <td colspan="3">TOTAL FINE:</td>
+                    <td><?= number_format($totalFine, 3) ?></td>
+                </tr>
+            </tbody>
+        </table>
+        <div class="divider"></div>
+
+        <div class="row"><span class="label">Issue Weight:</span><span class="value"><?= number_format((float)$transaction['delivered_weight'], 3) ?> g</span></div>
+        <div class="row"><span class="label">Difference:</span><span class="value"><?= number_format((float)$transaction['difference_weight'], 3) ?> g</span></div>
+        <div class="row"><span class="label">Rate:</span><span class="value">Rs.<?= number_format((float)$transaction['rate'], 2) ?>/g</span></div>
+        <div class="divider"></div>
+
+        <div class="row"><span class="label">Amount:</span><span class="value amount-big">Rs.<?= number_format($amountVal, 2) ?></span></div>
+        <div class="row"><span class="label"><?= $h($paymentTypeLabel) ?>:</span><span class="value">Rs.<?= number_format($paidVal, 2) ?></span></div>
+        <div class="row"><span class="label">Balance:</span><span class="value">Rs.<?= number_format($balanceVal, 2) ?></span></div>
+        <div class="row"><span class="label">Pay Mode:</span><span class="value"><?= $h($transaction['payment_method']) ?></span></div>
+        <div class="row"><span class="label">Status:</span><span class="value"><?= $h($transaction['payment_status']) ?></span></div>
+
+        <?php if (!empty($transaction['narration'])): ?>
+        <div class="divider"></div>
+        <div class="section-title">Note:</div>
+        <div><?= $h($transaction['narration']) ?></div>
+        <?php endif; ?>
+
+        <div class="footer">Thank you for your business!</div>
+    </div>
+    <script>
+        window.addEventListener('load', function () {
+            setTimeout(function () { window.print(); }, 300);
+        });
+    </script>
+</body>
+</html>
+    <?php
+    exit;
+}
+
 // Calculate page height based on content
-// Base height covers headers and footers. Increased for larger fonts.
-$baseHeightMm = 120; 
+$baseHeightMm = 125;
 $itemsExtraMm = count($received_items) * 8; // Increased to 8mm per row for larger font
 $remarksExtraMm = !empty($transaction['narration']) ? 15 : 0;
 $pageHeightMm = $baseHeightMm + $itemsExtraMm + $remarksExtraMm;
@@ -188,6 +322,9 @@ function renderThermalReceipt($pdf, $company_name, $transaction, $received_items
     
     // Amount Section
     $paymentTypeLabel = $transaction['payment_type'] === 'Payment_In' ? 'Received' : 'Paid';
+    $amountVal = (float)$transaction['amount'];
+    $paidVal = (float)$transaction['payment_amount'];
+    $balanceVal = max(0, (float)($transaction['due_amount'] ?? ($amountVal - $paidVal)));
     
     $html .= '<table style="font-size:11px; margin:0.6mm 0;">
                 <tr>
@@ -196,7 +333,11 @@ function renderThermalReceipt($pdf, $company_name, $transaction, $received_items
                 </tr>
                 <tr>
                     <td class="label">' . $paymentTypeLabel . ':</td>
-                    <td style="text-align:right; font-weight:bold;">Rs.' . number_format((float)$transaction['payment_amount'], 2) . '</td>
+                    <td style="text-align:right; font-weight:bold;">Rs.' . number_format($paidVal, 2) . '</td>
+                </tr>
+                <tr>
+                    <td class="label">Balance:</td>
+                    <td style="text-align:right; font-weight:bold;">Rs.' . number_format($balanceVal, 2) . '</td>
                 </tr>
                 <tr>
                     <td class="label">Pay Mode:</td>

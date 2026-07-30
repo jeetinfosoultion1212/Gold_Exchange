@@ -9,9 +9,207 @@ if (!isset($_SESSION['user_id'])) {
 
 // Load database configuration
 require_once __DIR__ . '/config/database.php';
+require_once __DIR__ . '/helpers/gold_rate_helper.php';
 
 if ($conn->connect_error) {
     die('Database connection failed: ' . $conn->connect_error);
+}
+
+/** Tables that store line rows keyed by transactions.id (must be removed before deleting a transaction). */
+function settings_transaction_child_tables(): array
+{
+    return ['exchange_items', 'gold_sale_items', 'gold_purchase_items'];
+}
+
+/**
+ * Delete one transaction row for the current company and all known child line-item rows.
+ * Used by Settings → Tables when manually deleting a transaction (avoids orphan rows / FK errors).
+ */
+function settings_delete_transaction_with_children(mysqli $conn, int $transaction_id, int $company_id): bool
+{
+    $tid = (int) $transaction_id;
+    $cid = (int) $company_id;
+    $check = $conn->query("SELECT id FROM transactions WHERE id = $tid AND company_id = $cid LIMIT 1");
+    if (!$check || $check->num_rows === 0) {
+        return false;
+    }
+    foreach (settings_transaction_child_tables() as $child) {
+        $esc = $conn->real_escape_string($child);
+        $tshow = $conn->query("SHOW TABLES LIKE '$esc'");
+        if (!$tshow || $tshow->num_rows === 0) {
+            continue;
+        }
+        $hasCo = $conn->query("SHOW COLUMNS FROM `$child` LIKE 'company_id'");
+        if ($hasCo && $hasCo->num_rows > 0) {
+            $conn->query("DELETE FROM `$child` WHERE transaction_id = $tid AND company_id = $cid");
+        } else {
+            $conn->query("DELETE FROM `$child` WHERE transaction_id = $tid");
+        }
+    }
+    return (bool) $conn->query("DELETE FROM transactions WHERE id = $tid AND company_id = $cid LIMIT 1");
+}
+
+/** Tables not listed in Data Explorer (read-only / system). */
+function settings_protected_data_tables(): array
+{
+    return ['companies', 'transaction_logs', 'party_summary', 'daily_summary'];
+}
+
+function settings_table_has_company_id(mysqli $conn, string $table): bool
+{
+    $safe = str_replace('`', '``', $table);
+    $r = $conn->query("SHOW COLUMNS FROM `$safe` LIKE 'company_id'");
+    return $r && $r->num_rows > 0;
+}
+
+/**
+ * SQL WHERE fragment to restrict rows to one tenant.
+ * `companies` uses primary key id; other tables use company_id when present.
+ */
+function settings_company_data_where(mysqli $conn, string $table, int $company_id): ?string
+{
+    $t = strtolower($table);
+    if ($t === 'companies') {
+        return 'id = ' . (int) $company_id;
+    }
+    if (settings_table_has_company_id($conn, $table)) {
+        return 'company_id = ' . (int) $company_id;
+    }
+    return null;
+}
+
+/** Preferred INSERT order for company backup / restore (parents before children). */
+function settings_company_backup_export_table_order(): array
+{
+    return [
+        'companies',
+        'users',
+        'parties',
+        'gold_stock',
+        'account_balances',
+        'company_banks',
+        'system_settings',
+        'transactions',
+        'gold_purchase',
+        'payment_transactions',
+        'exchange_items',
+        'gold_sale_items',
+        'gold_purchase_items',
+    ];
+}
+
+/**
+ * Remove all DB rows for one company (for company-scoped restore).
+ * Order: children first; companies last.
+ */
+function settings_purge_company_rows(mysqli $conn, int $company_id): void
+{
+    $cid = (int) $company_id;
+    $conn->query('SET FOREIGN_KEY_CHECKS = 0');
+    $stmts = [
+        "DELETE FROM exchange_items WHERE company_id = $cid",
+        "DELETE FROM gold_sale_items WHERE company_id = $cid",
+        "DELETE FROM gold_purchase_items WHERE company_id = $cid",
+        "DELETE FROM transactions WHERE company_id = $cid",
+        "DELETE FROM payment_transactions WHERE company_id = $cid",
+        "DELETE FROM gold_purchase WHERE company_id = $cid",
+        "DELETE FROM gold_stock WHERE company_id = $cid",
+        "DELETE FROM parties WHERE company_id = $cid",
+        "DELETE FROM system_settings WHERE company_id = $cid",
+        "DELETE FROM company_banks WHERE company_id = $cid",
+        "DELETE FROM account_balances WHERE company_id = $cid",
+        "DELETE FROM users WHERE company_id = $cid",
+        "DELETE FROM companies WHERE id = $cid",
+    ];
+    foreach ($stmts as $sql) {
+        $conn->query($sql);
+    }
+    $conn->query('SET FOREIGN_KEY_CHECKS = 1');
+}
+
+/** Parse company_id from a company backup file header; 0 if not a company backup. */
+function settings_parse_company_backup_id(string $sql): int
+{
+    if (strpos($sql, 'Gold_Exchange company backup') === false) {
+        return 0;
+    }
+    if (preg_match('/^--\\s*company_id:\\s*(\\d+)/mi', $sql, $m)) {
+        return (int) $m[1];
+    }
+    return 0;
+}
+
+function settings_append_inserts_for_table(mysqli $conn, string $table, ?string $where, string &$backup_content): void
+{
+    if ($where === null) {
+        return;
+    }
+    $safe = str_replace('`', '``', $table);
+    $data_result = $conn->query("SELECT * FROM `$safe` WHERE $where");
+    if (!$data_result) {
+        return;
+    }
+    $n = 0;
+    while ($row = $data_result->fetch_assoc()) {
+        $columns = array_keys($row);
+        $values = array_map(function ($val) use ($conn) {
+            return $val === null ? 'NULL' : "'" . $conn->real_escape_string((string) $val) . "'";
+        }, array_values($row));
+        $backup_content .= "INSERT INTO `$safe` (`" . implode('`, `', $columns) . "`) VALUES (" . implode(', ', $values) . ");\n";
+        $n++;
+    }
+    if ($n > 0) {
+        $backup_content .= "\n";
+    }
+}
+
+/**
+ * Replace all rows for this company with INSERTs from a company backup file.
+ *
+ * @return array{0:bool,1:string}
+ */
+function settings_restore_company_backup(mysqli $conn, string $sql_content, int $session_company_id): array
+{
+    $bid = settings_parse_company_backup_id($sql_content);
+    if ($bid <= 0) {
+        return [false, 'This file is not a company backup from Settings. Only files generated here (header: Gold_Exchange company backup) can be restored.'];
+    }
+    if ($bid !== (int) $session_company_id) {
+        return [false, 'This backup is for another store (company_id ' . $bid . '). Log into that store to restore it.'];
+    }
+    settings_purge_company_rows($conn, $session_company_id);
+    if (!$conn->multi_query($sql_content)) {
+        return [false, 'Restore failed: ' . $conn->error];
+    }
+    do {
+        if ($result = $conn->store_result()) {
+            $result->free();
+        }
+        if ($conn->errno) {
+            return [false, 'Restore failed: ' . $conn->error];
+        }
+    } while ($conn->more_results() && $conn->next_result());
+
+    return [true, 'Company data restored. Please refresh the page.'];
+}
+
+/** UI grouping for Data Explorer tabs (Chart-of-Accounts style list). */
+function settings_table_category(string $table): string
+{
+    $t = strtolower($table);
+    if ($t === 'transactions') {
+        return 'Transactions';
+    }
+    if (in_array($t, ['exchange_items', 'gold_sale_items', 'gold_purchase_items'], true)) {
+        return 'Line items';
+    }
+    if (in_array($t, ['users', 'parties', 'gold_stock', 'gold_purchase'], true)) {
+        return 'Master data';
+    }
+    if (in_array($t, ['system_settings', 'company_banks', 'account_balances', 'payment_transactions'], true)) {
+        return 'Settings';
+    }
+    return 'Other';
 }
 
 // Get user and company info
@@ -27,23 +225,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['action'])) {
         switch ($_POST['action']) {
             case 'get_tables':
-                // Only show actual database tables from schema
-                $actual_tables = ['users', 'parties', 'transactions', 'exchange_items', 'gold_stock'];
-                
-                // Protected tables that should not be edited
-                $protected_tables = ['companies', 'transaction_logs', 'party_summary', 'daily_summary'];
-                
-                // Return only actual tables that are not protected
-                $editable_tables = array_diff($actual_tables, $protected_tables);
-                
-                echo json_encode(['status' => 'success', 'tables' => array_values($editable_tables)]);
+                $protected_tables = settings_protected_data_tables();
+                $editable_tables = [];
+                $r = $conn->query('SHOW TABLES');
+                if ($r) {
+                    while ($row = $r->fetch_array()) {
+                        $t = $row[0];
+                        if (!in_array($t, $protected_tables, true)) {
+                            $editable_tables[] = $t;
+                        }
+                    }
+                }
+                sort($editable_tables, SORT_STRING);
+                $table_meta = [];
+                foreach ($editable_tables as $t) {
+                    $safe = str_replace('`', '``', $t);
+                    $rows = 0;
+                    $whereCo = settings_company_data_where($conn, $t, $company_id);
+                    if ($whereCo !== null) {
+                        $cq = $conn->query("SELECT COUNT(*) AS c FROM `$safe` WHERE $whereCo");
+                    } else {
+                        $cq = false;
+                    }
+                    if ($cq && $cr = $cq->fetch_assoc()) {
+                        $rows = (int) $cr['c'];
+                    }
+                    $table_meta[] = [
+                        'name' => $t,
+                        'rows' => $rows,
+                        'category' => settings_table_category($t),
+                    ];
+                }
+                echo json_encode([
+                    'status' => 'success',
+                    'tables' => $editable_tables,
+                    'table_meta' => $table_meta,
+                ]);
                 exit;
                 
             case 'get_table_data':
                 $table_name = $conn->real_escape_string($_POST['table_name']);
                 
-                // Protected tables that should not be edited
-                $protected_tables = ['companies', 'transaction_logs', 'party_summary', 'daily_summary'];
+                $protected_tables = settings_protected_data_tables();
                 
                 // Validate table name to prevent SQL injection
                 $valid_tables_query = "SHOW TABLES";
@@ -74,9 +297,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ];
                 }
                 
-                // Get table data
-                $data_query = "SELECT * FROM `$table_name` ORDER BY id DESC LIMIT 1000";
+                $whereCo = settings_company_data_where($conn, $table_name, $company_id);
+                if ($whereCo === null) {
+                    echo json_encode(['status' => 'error', 'message' => 'This table is not scoped to your company in the explorer.']);
+                    exit;
+                }
+
+                $order_col = 'id';
+                $has_id = $conn->query("SHOW COLUMNS FROM `$table_name` LIKE 'id'");
+                if (!$has_id || $has_id->num_rows === 0) {
+                    $pk = $conn->query("SHOW KEYS FROM `$table_name` WHERE Key_name = 'PRIMARY'");
+                    if ($pk && $pk->num_rows > 0 && $pc = $pk->fetch_assoc()) {
+                        $order_col = $pc['Column_name'];
+                    } else {
+                        $order_col = null;
+                    }
+                }
+                $data_query = $order_col
+                    ? "SELECT * FROM `$table_name` WHERE $whereCo ORDER BY `$order_col` DESC LIMIT 1000"
+                    : "SELECT * FROM `$table_name` WHERE $whereCo LIMIT 1000";
                 $data_result = $conn->query($data_query);
+                if (!$data_result) {
+                    echo json_encode(['status' => 'error', 'message' => 'Query failed: ' . $conn->error]);
+                    exit;
+                }
                 $data = [];
                 
                 while ($row = $data_result->fetch_assoc()) {
@@ -97,16 +341,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $field_name = $conn->real_escape_string($_POST['field_name']);
                 $field_value = $conn->real_escape_string($_POST['field_value']);
                 
-                // Protected tables
-                $protected_tables = ['companies', 'transaction_logs', 'party_summary', 'daily_summary'];
+                $protected_tables = settings_protected_data_tables();
                 
                 // Validate table name
                 if (in_array($table_name, $protected_tables)) {
                     echo json_encode(['status' => 'error', 'message' => 'Cannot edit protected tables']);
                     exit;
                 }
+
+                $whereCo = settings_company_data_where($conn, $table_name, $company_id);
+                if ($whereCo === null) {
+                    echo json_encode(['status' => 'error', 'message' => 'This table is not editable in company scope']);
+                    exit;
+                }
+                $chk = $conn->query("SELECT 1 FROM `$table_name` WHERE id = $record_id AND ($whereCo) LIMIT 1");
+                if (!$chk || $chk->num_rows === 0) {
+                    echo json_encode(['status' => 'error', 'message' => 'Record not found for your company']);
+                    exit;
+                }
+                if (strcasecmp($field_name, 'company_id') === 0 && (int) $field_value !== (int) $company_id) {
+                    echo json_encode(['status' => 'error', 'message' => 'company_id cannot be changed to another store']);
+                    exit;
+                }
                 
-                $update_query = "UPDATE `$table_name` SET `$field_name` = '$field_value' WHERE id = $record_id";
+                $update_query = "UPDATE `$table_name` SET `$field_name` = '$field_value' WHERE id = $record_id AND ($whereCo)";
                 
                 if ($conn->query($update_query)) {
                     echo json_encode(['status' => 'success', 'message' => 'Record updated successfully']);
@@ -119,16 +377,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $table_name = $conn->real_escape_string($_POST['table_name']);
                 $record_id = intval($_POST['record_id']);
                 
-                // Protected tables
-                $protected_tables = ['companies', 'transaction_logs', 'party_summary', 'daily_summary'];
+                $protected_tables = settings_protected_data_tables();
                 
-                // Validate table name
                 if (in_array($table_name, $protected_tables)) {
                     echo json_encode(['status' => 'error', 'message' => 'Cannot delete from protected tables']);
                     exit;
                 }
-                
-                $delete_query = "DELETE FROM `$table_name` WHERE id = $record_id";
+
+                $valid_tables_result = $conn->query('SHOW TABLES');
+                $valid_tables = [];
+                while ($row = $valid_tables_result->fetch_array()) {
+                    $valid_tables[] = $row[0];
+                }
+                if (!in_array($table_name, $valid_tables, true)) {
+                    echo json_encode(['status' => 'error', 'message' => 'Invalid table name']);
+                    exit;
+                }
+
+                if ($table_name === 'transactions') {
+                    if (settings_delete_transaction_with_children($conn, $record_id, $company_id)) {
+                        echo json_encode(['status' => 'success', 'message' => 'Transaction and all linked line items deleted']);
+                    } else {
+                        echo json_encode(['status' => 'error', 'message' => 'Transaction not found for this company or delete failed: ' . $conn->error]);
+                    }
+                    exit;
+                }
+
+                $whereCo = settings_company_data_where($conn, $table_name, $company_id);
+                if ($whereCo === null) {
+                    echo json_encode(['status' => 'error', 'message' => 'This table cannot be modified in company scope']);
+                    exit;
+                }
+                $delete_query = "DELETE FROM `$table_name` WHERE id = $record_id AND ($whereCo)";
                 
                 if ($conn->query($delete_query)) {
                     echo json_encode(['status' => 'success', 'message' => 'Record deleted successfully']);
@@ -138,48 +418,61 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 exit;
                 
             case 'backup_database':
-                // Create backup directory if not exists
                 $backup_dir = __DIR__ . '/backups';
                 if (!file_exists($backup_dir)) {
                     mkdir($backup_dir, 0777, true);
                 }
-                
-                $backup_file = $backup_dir . '/backup_' . date('Y-m-d_H-i-s') . '.sql';
-                
-                // Get database name from connection
-                $db_name = $conn->query("SELECT DATABASE()")->fetch_row()[0];
-                
-                // Get all tables
-                $tables_result = $conn->query("SHOW TABLES");
-                $backup_content = "-- Database Backup\n";
-                $backup_content .= "-- Created: " . date('Y-m-d H:i:s') . "\n\n";
-                
-                while ($table = $tables_result->fetch_array()) {
-                    $table_name = $table[0];
-                    $backup_content .= "\n\n-- Table: $table_name\n";
-                    
-                    // Get CREATE TABLE statement
-                    $create_table = $conn->query("SHOW CREATE TABLE `$table_name`")->fetch_row();
-                    $backup_content .= $create_table[1] . ";\n\n";
-                    
-                    // Get table data
-                    $data_result = $conn->query("SELECT * FROM `$table_name`");
-                    
-                    while ($row = $data_result->fetch_assoc()) {
-                        $columns = array_keys($row);
-                        $values = array_map(function($val) use ($conn) {
-                            return $val === null ? 'NULL' : "'" . $conn->real_escape_string($val) . "'";
-                        }, array_values($row));
-                        
-                        $backup_content .= "INSERT INTO `$table_name` (`" . implode('`, `', $columns) . "`) VALUES (" . implode(', ', $values) . ");\n";
-                    }
+
+                $backup_file = $backup_dir . '/backup_company_' . $company_id . '_' . date('Y-m-d_H-i-s') . '.sql';
+                $co_name = $conn->real_escape_string($company_name ?? '');
+                $backup_content = "-- Gold_Exchange company backup\n";
+                $backup_content .= '-- company_id: ' . (int) $company_id . "\n";
+                $backup_content .= '-- Store: ' . $co_name . "\n";
+                $backup_content .= '-- Created: ' . date('Y-m-d H:i:s') . "\n";
+                $backup_content .= "-- Data-only snapshot (restore from Settings uses this store only).\n\n";
+                $backup_content .= "SET NAMES utf8mb4;\n";
+                $backup_content .= "SET FOREIGN_KEY_CHECKS=0;\n\n";
+
+                $tables_result = $conn->query('SHOW TABLES');
+                $all_tables = [];
+                while ($row = $tables_result->fetch_array()) {
+                    $all_tables[] = $row[0];
                 }
-                
+
+                $skip_dump = ['transaction_logs', 'party_summary', 'daily_summary'];
+                $order = settings_company_backup_export_table_order();
+                $exported = [];
+                foreach ($order as $tbl) {
+                    if (!in_array($tbl, $all_tables, true)) {
+                        continue;
+                    }
+                    if (in_array($tbl, $skip_dump, true)) {
+                        continue;
+                    }
+                    $where = settings_company_data_where($conn, $tbl, $company_id);
+                    $backup_content .= "-- Table: $tbl\n";
+                    settings_append_inserts_for_table($conn, $tbl, $where, $backup_content);
+                    $exported[$tbl] = true;
+                }
+                foreach ($all_tables as $tbl) {
+                    if (isset($exported[$tbl]) || in_array($tbl, $skip_dump, true)) {
+                        continue;
+                    }
+                    $where = settings_company_data_where($conn, $tbl, $company_id);
+                    if ($where === null) {
+                        continue;
+                    }
+                    $backup_content .= "-- Table: $tbl\n";
+                    settings_append_inserts_for_table($conn, $tbl, $where, $backup_content);
+                }
+
+                $backup_content .= "SET FOREIGN_KEY_CHECKS=1;\n";
+
                 if (file_put_contents($backup_file, $backup_content)) {
                     echo json_encode([
                         'status' => 'success',
-                        'message' => 'Backup created successfully',
-                        'filename' => basename($backup_file)
+                        'message' => 'Company data backup saved (this store only).',
+                        'filename' => basename($backup_file),
                     ]);
                 } else {
                     echo json_encode(['status' => 'error', 'message' => 'Failed to create backup file']);
@@ -216,18 +509,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 
                 $sql_content = file_get_contents($backup_file);
-                
-                // Execute SQL statements
-                $conn->multi_query($sql_content);
-                
-                // Wait for all queries to finish
-                do {
-                    if ($result = $conn->store_result()) {
-                        $result->free();
-                    }
-                } while ($conn->more_results() && $conn->next_result());
-                
-                echo json_encode(['status' => 'success', 'message' => 'Database restored successfully']);
+                [$ok, $msg] = settings_restore_company_backup($conn, $sql_content, $company_id);
+                echo json_encode($ok ? ['status' => 'success', 'message' => $msg] : ['status' => 'error', 'message' => $msg]);
                 exit;
                 
             case 'upload_restore_backup':
@@ -245,59 +528,52 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     exit;
                 }
                 
-                // Read file content
                 $sql_content = file_get_contents($file['tmp_name']);
                 
                 if (empty($sql_content)) {
                     echo json_encode(['status' => 'error', 'message' => 'Backup file is empty']);
                     exit;
                 }
-                
-                // Execute SQL statements
-                $conn->multi_query($sql_content);
-                
-                // Wait for all queries to finish
-                do {
-                    if ($result = $conn->store_result()) {
-                        $result->free();
-                    }
-                } while ($conn->more_results() && $conn->next_result());
-                
-                // Optionally save the uploaded file to backups folder
+
+                [$ok, $msg] = settings_restore_company_backup($conn, $sql_content, $company_id);
+                if (!$ok) {
+                    echo json_encode(['status' => 'error', 'message' => $msg]);
+                    exit;
+                }
+
                 $backup_dir = __DIR__ . '/backups';
                 if (!file_exists($backup_dir)) {
                     mkdir($backup_dir, 0777, true);
                 }
-                $backup_filename = 'uploaded_' . date('Y-m-d_H-i-s') . '.sql';
+                $backup_filename = 'uploaded_company_' . $company_id . '_' . date('Y-m-d_H-i-s') . '.sql';
                 move_uploaded_file($file['tmp_name'], $backup_dir . '/' . $backup_filename);
                 
-                echo json_encode(['status' => 'success', 'message' => 'Backup uploaded and restored successfully']);
+                echo json_encode(['status' => 'success', 'message' => $msg]);
                 exit;
                 
             case 'reset_table':
                 $table_name = $conn->real_escape_string($_POST['table_name']);
                 
-                // Protected tables - cannot be reset (only companies and users are protected)
                 $protected_reset_tables = ['companies', 'users', 'transaction_logs', 'party_summary', 'daily_summary'];
                 
-                // Validate table name
                 if (in_array($table_name, $protected_reset_tables)) {
                     echo json_encode(['status' => 'error', 'message' => 'Cannot reset this critical table']);
                     exit;
                 }
-                
-                // Disable foreign key checks temporarily
-                $conn->query("SET FOREIGN_KEY_CHECKS = 0");
-                
-                $truncate_query = "TRUNCATE TABLE `$table_name`";
-                
-                if ($conn->query($truncate_query)) {
-                    // Re-enable foreign key checks
-                    $conn->query("SET FOREIGN_KEY_CHECKS = 1");
-                    echo json_encode(['status' => 'success', 'message' => 'Table reset successfully']);
+
+                $whereCo = settings_company_data_where($conn, $table_name, $company_id);
+                if ($whereCo === null) {
+                    echo json_encode(['status' => 'error', 'message' => 'This table is not scoped by company; clearing it for one store only is not supported here.']);
+                    exit;
+                }
+
+                $conn->query('SET FOREIGN_KEY_CHECKS = 0');
+                $ok = $conn->query("DELETE FROM `$table_name` WHERE $whereCo");
+                $conn->query('SET FOREIGN_KEY_CHECKS = 1');
+
+                if ($ok) {
+                    echo json_encode(['status' => 'success', 'message' => 'All rows for your company were removed from this table.']);
                 } else {
-                    // Re-enable foreign key checks
-                    $conn->query("SET FOREIGN_KEY_CHECKS = 1");
                     echo json_encode(['status' => 'error', 'message' => 'Reset failed: ' . $conn->error]);
                 }
                 exit;
@@ -306,14 +582,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $table_name = $conn->real_escape_string($_POST['table_name']);
                 $data = json_decode($_POST['data'], true);
                 
-                // Protected tables
-                $protected_tables = ['companies', 'transaction_logs', 'party_summary', 'daily_summary'];
+                $protected_tables = settings_protected_data_tables();
                 
                 if (in_array($table_name, $protected_tables)) {
                     echo json_encode(['status' => 'error', 'message' => 'Cannot add to protected tables']);
                     exit;
                 }
-                
+                if (!is_array($data)) {
+                    echo json_encode(['status' => 'error', 'message' => 'Invalid data']);
+                    exit;
+                }
+                $vt = $conn->query('SHOW TABLES');
+                $valid_list = [];
+                while ($r = $vt->fetch_array()) {
+                    $valid_list[] = $r[0];
+                }
+                if (!in_array($table_name, $valid_list, true)) {
+                    echo json_encode(['status' => 'error', 'message' => 'Invalid table']);
+                    exit;
+                }
+                if (settings_table_has_company_id($conn, $table_name)) {
+                    $data['company_id'] = (string) $company_id;
+                }
+
                 $columns = array_keys($data);
                 $values = array_map(function($val) use ($conn) {
                     return $val === '' || $val === null ? 'NULL' : "'" . $conn->real_escape_string($val) . "'";
@@ -336,10 +627,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     // Disable foreign key checks temporarily
                     $conn->query("SET FOREIGN_KEY_CHECKS = 0");
                     
-                    // Reset tables in order (respecting foreign key dependencies)
                     $reset_queries = [
+                        "DELETE FROM exchange_items WHERE company_id = $company_id",
+                        "DELETE FROM gold_sale_items WHERE company_id = $company_id",
+                        "DELETE FROM gold_purchase_items WHERE company_id = $company_id",
                         "DELETE FROM transactions WHERE company_id = $company_id",
-                        "DELETE FROM gold_stock WHERE company_id = $company_id", 
+                        "DELETE FROM gold_stock WHERE company_id = $company_id",
                         "DELETE FROM parties WHERE company_id = $company_id"
                     ];
                     
@@ -392,6 +685,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $info_query = "SELECT * FROM companies WHERE id = $company_id";
                 $info_result = $conn->query($info_query);
                 if ($info = $info_result->fetch_assoc()) {
+                    $info['gold_rate_unit'] = gold_rate_get_unit($conn, $company_id);
                     echo json_encode(['status' => 'success', 'data' => $info]);
                 } else {
                     echo json_encode(['status' => 'error', 'message' => 'Company not found']);
@@ -412,6 +706,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $city = $conn->real_escape_string($_POST['city']);
                 $gstin = $conn->real_escape_string($_POST['gstin']);
                 $pin = $conn->real_escape_string($_POST['pin']);
+                $gold_rate_unit = isset($_POST['gold_rate_unit']) ? trim($_POST['gold_rate_unit']) : GOLD_RATE_UNIT_GRAM;
                 
                 $sql = "UPDATE companies SET 
                         company_name = '$company_name',
@@ -425,6 +720,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         WHERE id = $company_id";
                 
                 if ($conn->query($sql)) {
+                    gold_rate_save_unit($conn, $company_id, $gold_rate_unit);
                     $_SESSION['company_name'] = $company_name; // Sync session
                     echo json_encode(['status' => 'success', 'message' => 'Company profile updated successfully']);
                 } else {
@@ -525,6 +821,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         body {
             background: linear-gradient(135deg, #f5f7fa 0%, #e8ecf1 100%);
         }
+        .de-tab {
+            border-bottom: 2px solid transparent;
+            color: #64748b;
+        }
+        .de-tab:hover {
+            color: #334155;
+        }
+        .de-tab-active {
+            border-bottom-color: #2563eb;
+            color: #1d4ed8;
+            font-weight: 700;
+        }
+        .de-master-thead {
+            background: linear-gradient(180deg, #d1fae5 0%, #a7f3d0 100%);
+        }
+        .de-detail-thead {
+            background: linear-gradient(180deg, #d1fae5 0%, #a7f3d0 100%);
+        }
     </style>
 </head>
 <body class="bg-gray-50">
@@ -536,7 +850,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <?php include 'components/sidebar.php'; ?>
         
         <!-- Main Content -->
-        <div class="flex-1 p-2 ml-16">
+        <div class="flex-1 p-2 main-with-sidebar">
             <div class="w-full">
                 <!-- Page Header (Compact) -->
                 <div class="mb-3 px-2 flex items-center justify-between">
@@ -580,10 +894,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             </h2>
                             <div class="space-y-3">
                                 <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
-                                    <p class="text-[10px] uppercase font-black text-gray-400 mb-2 tracking-widest">Standard Backup</p>
+                                    <p class="text-[10px] uppercase font-black text-gray-400 mb-2 tracking-widest">This store only</p>
                                     <button onclick="createBackup()" class="w-full bg-slate-600 hover:bg-slate-700 text-white text-[11px] font-bold py-2 px-4 rounded transition shadow-sm">
-                                        <i class="fas fa-download mr-2"></i>Generate New SQL Backup
+                                        <i class="fas fa-download mr-2"></i>Download company SQL backup
                                     </button>
+                                    <p class="text-[9px] text-slate-500 mt-2 leading-relaxed">Exports <strong>only</strong> rows for your current company (parties, stock, transactions, users of this store, etc.). Other stores in the database are not included.</p>
                                 </div>
                                 
                                 <div class="p-3 bg-blue-50 rounded-lg border border-blue-100">
@@ -599,9 +914,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         <!-- Restore Backup -->
                         <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
                             <h2 class="text-xl font-semibold text-gray-800 mb-4" style="font-family: 'Poppins', sans-serif;">
-                                <i class="fas fa-upload text-emerald-600 mr-2"></i>Restore Backup
+                                <i class="fas fa-upload text-emerald-600 mr-2"></i>Restore company backup
                             </h2>
-                            <p class="text-gray-600 mb-4" style="font-family: 'Poppins', sans-serif; font-weight: 400;">Restore database from a previous backup</p>
+                            <p class="text-gray-600 mb-4 text-sm" style="font-family: 'Poppins', sans-serif; font-weight: 400;">Only backups created on this screen (header: <code class="text-xs bg-gray-100 px-1 rounded">Gold_Exchange company backup</code>) for the <strong>same</strong> company can be restored. All current data for <strong>this store</strong> is cleared first, then the file is applied.</p>
                             
                             <!-- Upload Backup File -->
                             <div class="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
@@ -627,44 +942,79 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     </div>
                 </div>
                 
-                <!-- Manage Tables Tab -->
+                <!-- Manage Tables Tab (Chart-of-Accounts style table list) -->
                 <div id="content-tables" class="tab-content hidden">
-                    <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-                        <div class="flex justify-between items-center mb-4">
-                            <h2 class="text-[13px] font-bold text-gray-800 uppercase tracking-tight" style="font-family: 'Poppins', sans-serif;">
-                                <i class="fas fa-database text-slate-600 mr-2 text-xs"></i>Data Explorer
-                            </h2>
-                            <button onclick="loadTables()" class="bg-slate-500 hover:bg-slate-600 text-white px-3 py-1.5 rounded-lg text-[10px] font-bold shadow-sm transition">
-                                <i class="fas fa-sync mr-1.5 opacity-70"></i>Refresh Schema
+                    <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-4 md:p-5">
+                        <div class="flex flex-wrap items-center justify-between gap-2 mb-1">
+                            <div>
+                                <h2 class="text-[13px] font-bold text-gray-800 uppercase tracking-tight" style="font-family: 'Poppins', sans-serif;">
+                                    <i class="fas fa-database text-slate-600 mr-2 text-xs"></i>Data Explorer
+                                </h2>
+                                <p class="text-[9px] text-slate-500 font-semibold mt-0.5">Row counts and grid data are limited to your logged-in company only.</p>
+                            </div>
+                            <button type="button" onclick="loadTables()" class="text-slate-500 hover:text-slate-700 p-1.5 rounded-lg border border-slate-200 bg-slate-50" title="Refresh schema">
+                                <i class="fas fa-sync-alt text-xs"></i>
                             </button>
                         </div>
-                        
-                        <!-- Tables List -->
-                        <div id="tablesList" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mb-6">
-                            <p class="text-gray-400">Loading tables...</p>
-                        </div>
-                        
-                        <!-- Table Data View -->
-                        <div id="tableDataView" class="hidden">
-                            <div class="flex justify-between items-center mb-4 border-t pt-4">
-                                <div>
-                                    <h3 class="text-lg font-semibold text-gray-800" style="font-family: 'Poppins', sans-serif;">Table: <span id="currentTableName" class="text-slate-600"></span></h3>
-                                    <p class="text-sm text-gray-600" style="font-family: 'Poppins', sans-serif; font-weight: 400;">Click on any cell to edit</p>
+
+                        <div id="deListPanel">
+                            <!-- Filter bar -->
+                            <div class="flex flex-wrap items-end gap-2 gap-y-2 p-2.5 bg-slate-50/80 border border-slate-200 rounded-lg mb-2">
+                                <div class="flex flex-col min-w-[8rem]">
+                                    <label class="text-[8px] font-bold text-slate-500 uppercase tracking-wider mb-0.5">Table search</label>
+                                    <input type="text" id="deTableSearch" placeholder="e.g. transactions" class="border border-slate-200 rounded px-2 py-1.5 text-[11px] font-semibold text-slate-800 w-40 md:w-48 focus:ring-1 focus:ring-indigo-400" autocomplete="off">
                                 </div>
-                                <div class="space-x-2">
-                                    <button onclick="addNewRecord()" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg font-medium shadow-sm" style="font-family: 'Poppins', sans-serif;">
-                                        <i class="fas fa-plus mr-2"></i>Add Record
+                                <button type="button" id="deFilterBtn" class="inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1.5 rounded-lg text-[10px] font-bold shadow-sm transition">
+                                    <i class="fas fa-search text-[9px]"></i> Filter
+                                </button>
+                                <button type="button" onclick="loadTables()" class="inline-flex items-center gap-1.5 bg-slate-600 hover:bg-slate-700 text-white px-3 py-1.5 rounded-lg text-[10px] font-bold shadow-sm transition ml-auto">
+                                    <i class="fas fa-sync text-[9px]"></i> Refresh
+                                </button>
+                            </div>
+
+                            <!-- Category tabs -->
+                            <div id="deTabs" class="flex flex-wrap gap-1 border-b border-slate-200 mb-2 pb-px min-h-[2rem]"></div>
+
+                            <!-- Master table list -->
+                            <div class="overflow-x-auto rounded-lg border border-slate-200 shadow-xs">
+                                <table class="w-full text-left text-[11px]" id="deMasterTable">
+                                    <thead class="de-master-thead">
+                                        <tr class="text-[10px] font-bold text-emerald-900 uppercase tracking-tight border-b border-emerald-200/80">
+                                            <th class="px-3 py-2.5 w-12">#</th>
+                                            <th class="px-3 py-2.5">Table name</th>
+                                            <th class="px-3 py-2.5 hidden sm:table-cell">Description</th>
+                                            <th class="px-3 py-2.5">Type</th>
+                                            <th class="px-3 py-2.5 text-right">Rows</th>
+                                            <th class="px-3 py-2.5 text-center w-24">Open</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="deMasterTableBody" class="divide-y divide-slate-100 bg-white text-slate-800">
+                                        <tr><td colspan="6" class="px-3 py-8 text-center text-slate-400 italic">Loading…</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- Row detail / edit view -->
+                        <div id="tableDataView" class="hidden mt-4 border-t border-slate-200 pt-4">
+                            <div class="flex flex-wrap justify-between items-start gap-2 mb-3">
+                                <div>
+                                    <button type="button" onclick="closeTableView()" class="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 mb-1 flex items-center gap-1">
+                                        <i class="fas fa-arrow-left"></i> Back to table list
                                     </button>
-                                    <button onclick="closeTableView()" class="bg-slate-500 hover:bg-slate-600 text-white px-4 py-2 rounded-lg font-medium shadow-sm" style="font-family: 'Poppins', sans-serif;">
-                                        <i class="fas fa-times mr-2"></i>Close
+                                    <h3 class="text-sm font-bold text-slate-800" style="font-family: 'Poppins', sans-serif;">
+                                        <span id="currentTableName" class="text-indigo-700"></span>
+                                    </h3>
+                                    <p class="text-[10px] text-slate-500 font-medium">Click a cell to edit (non-ID columns). Deleting a <code class="text-[9px] bg-slate-100 px-1 rounded">transactions</code> row also removes linked line items.</p>
+                                </div>
+                                <div class="flex flex-wrap gap-2">
+                                    <button type="button" onclick="addNewRecord()" class="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg text-[10px] font-bold shadow-sm">
+                                        <i class="fas fa-plus mr-1"></i>Add row
                                     </button>
                                 </div>
                             </div>
-                            
-                            <div class="overflow-x-auto">
-                                <table id="tableDataTable" class="w-full text-sm">
-                                    <!-- Table will be populated by JavaScript -->
-                                </table>
+                            <div class="overflow-x-auto rounded-lg border border-slate-200">
+                                <table id="tableDataTable" class="w-full text-[11px]"></table>
                             </div>
                         </div>
                     </div>
@@ -799,6 +1149,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                              <label class="block text-[8px] font-bold text-slate-600 uppercase mb-0.5 tracking-tighter">Registration Email</label>
                                              <input type="email" name="company_email" id="profile_company_email" class="w-full border border-slate-200 rounded px-1.5 py-1 text-[11px] font-semibold focus:ring-1 focus:ring-indigo-400 h-7" style="font-family: 'Poppins', sans-serif;">
                                          </div>
+                                         <div class="col-span-3">
+                                             <label class="block text-[8px] font-bold text-amber-700 uppercase mb-0.5 tracking-tighter">Gold Rate Unit</label>
+                                             <select name="gold_rate_unit" id="profile_gold_rate_unit" class="w-full border border-amber-200 rounded px-1 py-1 text-[11px] font-bold focus:ring-1 focus:ring-amber-400 h-7 appearance-none bg-white text-amber-900" style="font-family: 'Poppins', sans-serif;">
+                                                 <option value="gram">Per Gram (₹/g)</option>
+                                                 <option value="10gram">Per 10 Grams (₹/10g)</option>
+                                             </select>
+                                         </div>
                                      </div>
                                  </form>
 
@@ -844,6 +1201,109 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <script>
         let currentTable = null;
         let currentTableData = null;
+        let deTableMeta = [];
+        let deActiveTab = 'all';
+
+        function escapeHtml(str) {
+            if (str == null) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        function deCategoryPillClass(cat) {
+            const map = {
+                'Transactions': 'bg-blue-100 text-blue-800 border border-blue-200',
+                'Line items': 'bg-violet-100 text-violet-800 border border-violet-200',
+                'Master data': 'bg-amber-100 text-amber-900 border border-amber-200',
+                'Settings': 'bg-slate-100 text-slate-800 border border-slate-200',
+                'Other': 'bg-gray-100 text-gray-700 border border-gray-200',
+            };
+            return map[cat] || map['Other'];
+        }
+
+        function deTableDescription(name) {
+            const key = String(name).toLowerCase();
+            const map = {
+                transactions: 'Bookings, sales, purchases, payments, exchange & expense headers',
+                exchange_items: 'Exchange lines: received scrap / issued fine',
+                gold_sale_items: 'Sale invoice line items (stock)',
+                gold_purchase_items: 'Purchase invoice line items (stock)',
+                parties: 'Party master (balances & contact)',
+                users: 'Store login accounts',
+                gold_stock: 'Vault stock by metal, purity & cash/bank mode',
+                system_settings: 'Company key–value settings',
+                company_banks: 'Linked bank accounts',
+                account_balances: 'Shop cash / bank balances',
+                payment_transactions: 'Payment transaction log',
+                gold_purchase: 'Legacy purchase records (if used)',
+            };
+            return map[key] || 'Application data table';
+        }
+
+        function getDeFilteredMeta() {
+            let m = deTableMeta.slice();
+            if (deActiveTab !== 'all') {
+                m = m.filter(x => x.category === deActiveTab);
+            }
+            const q = ($('#deTableSearch').val() || '').trim().toLowerCase();
+            if (q) {
+                m = m.filter(x => x.name.toLowerCase().includes(q));
+            }
+            return m;
+        }
+
+        function renderDeTabs() {
+            const tabs = $('#deTabs');
+            tabs.empty();
+            const categories = [
+                { key: 'all', label: 'All Tables' },
+                { key: 'Transactions', label: 'Transactions' },
+                { key: 'Line items', label: 'Line items' },
+                { key: 'Master data', label: 'Master data' },
+                { key: 'Settings', label: 'Settings' },
+                { key: 'Other', label: 'Other' },
+            ];
+            categories.forEach(c => {
+                let count = deTableMeta.length;
+                if (c.key !== 'all') {
+                    count = deTableMeta.filter(m => m.category === c.key).length;
+                }
+                const cls = deActiveTab === c.key ? 'de-tab de-tab-active' : 'de-tab';
+                tabs.append(
+                    '<button type="button" data-de-tab="' + escapeHtml(c.key) + '" class="' + cls + ' px-3 py-2 text-[10px] font-bold uppercase tracking-tight rounded-t transition whitespace-nowrap">' +
+                    escapeHtml(c.label) + ' <span class="opacity-70 font-semibold">(' + count + ')</span></button>'
+                );
+            });
+        }
+
+        function renderDeMasterBody() {
+            const body = $('#deMasterTableBody');
+            body.empty();
+            const list = getDeFilteredMeta();
+            if (list.length === 0) {
+                body.html('<tr><td colspan="6" class="px-3 py-8 text-center text-slate-400 italic">No tables match this filter.</td></tr>');
+                return;
+            }
+            list.forEach((meta, idx) => {
+                const pill = deCategoryPillClass(meta.category);
+                const desc = deTableDescription(meta.name);
+                const nm = escapeHtml(meta.name);
+                body.append(
+                    '<tr class="de-master-row hover:bg-emerald-50/50 transition border-b border-slate-50" data-name="' + nm + '">' +
+                    '<td class="px-3 py-2 font-mono text-slate-500 w-12">' + (idx + 1) + '</td>' +
+                    '<td class="px-3 py-2 font-bold text-slate-800">' + nm + '</td>' +
+                    '<td class="px-3 py-2 text-slate-600 hidden sm:table-cell max-w-md">' + escapeHtml(desc) + '</td>' +
+                    '<td class="px-3 py-2"><span class="inline-flex px-2 py-0.5 rounded-full text-[9px] font-bold ' + pill + '">' + escapeHtml(meta.category) + '</span></td>' +
+                    '<td class="px-3 py-2 text-right font-mono font-semibold tabular-nums text-slate-700">' + Number(meta.rows).toLocaleString() + '</td>' +
+                    '<td class="px-3 py-2 text-center">' +
+                    '<button type="button" class="de-open-table inline-flex items-center gap-1 px-2 py-1 rounded-md bg-indigo-50 text-indigo-700 text-[9px] font-bold border border-indigo-100 hover:bg-indigo-100" data-name="' + nm + '">' +
+                    '<i class="fas fa-external-link-alt text-[8px]"></i> Open</button></td></tr>'
+                );
+            });
+        }
         
         // Tab switching
         function showTab(tab) {
@@ -942,8 +1402,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         // Restore backup
         function restoreBackup(filename) {
             Swal.fire({
-                title: 'Are you sure?',
-                text: 'This will replace all current data with the backup. This action cannot be undone!',
+                title: 'Replace this store’s data?',
+                text: 'All data for your current company will be deleted, then this backup will be loaded. Other companies in the database are not affected. This cannot be undone.',
                 icon: 'warning',
                 showCancelButton: true,
                 confirmButtonColor: '#22c55e',
@@ -1019,7 +1479,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         <p style="margin-bottom: 10px;"><strong>Size:</strong> ${(file.size / 1024).toFixed(2)} KB</p>
                         <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 12px; margin-top: 12px;">
                             <p style="color: #dc2626; font-weight: 600;">⚠️ Warning:</p>
-                            <p style="color: #7f1d1d; font-size: 14px; margin-top: 4px;">This will replace all current data with the uploaded backup. This action cannot be undone!</p>
+                            <p style="color: #7f1d1d; font-size: 14px; margin-top: 4px;">This clears <strong>only your current store</strong> and loads the file. The file must be a company backup from Settings with the same company_id.</p>
                         </div>
                     </div>
                 `,
@@ -1084,25 +1544,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             });
         }
         
-        // Load tables
         function loadTables() {
-            $.post('', {
-                action: 'get_tables'
-            }, function(response) {
+            $('#deMasterTableBody').html('<tr><td colspan="6" class="px-3 py-6 text-center text-slate-400 italic"><i class="fas fa-spinner fa-spin mr-2"></i>Loading schema…</td></tr>');
+            $.post('', { action: 'get_tables' }, function(response) {
                 if (response.status === 'success') {
-                    const tablesList = $('#tablesList');
-                    tablesList.empty();
-                    
-                    response.tables.forEach(table => {
-                        tablesList.append(`
-                            <button onclick="viewTable('${table}')" class="bg-gradient-to-br from-slate-500 to-slate-600 hover:from-slate-600 hover:to-slate-700 text-white p-4 rounded-lg shadow-sm transition transform hover:scale-105" style="font-family: 'Poppins', sans-serif;">
-                                <i class="fas fa-table text-2xl mb-2"></i>
-                                <p class="font-semibold">${table}</p>
-                            </button>
-                        `);
-                    });
+                    deTableMeta = response.table_meta && response.table_meta.length
+                        ? response.table_meta
+                        : (response.tables || []).map(name => ({ name, rows: 0, category: 'Other' }));
+                    renderDeTabs();
+                    renderDeMasterBody();
+                } else {
+                    $('#deMasterTableBody').html('<tr><td colspan="6" class="px-3 py-6 text-center text-rose-500">Failed to load tables.</td></tr>');
                 }
-            }, 'json');
+            }, 'json').fail(function() {
+                $('#deMasterTableBody').html('<tr><td colspan="6" class="px-3 py-6 text-center text-rose-500">Request failed.</td></tr>');
+            });
         }
         
         // Load tables for reset
@@ -1224,7 +1680,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $('#currentTableName').text(tableName);
                     renderTableData(response);
                     $('#tableDataView').removeClass('hidden');
-                    $('#tablesList').addClass('hidden');
+                    $('#deListPanel').addClass('hidden');
                 } else {
                     Swal.fire({
                         icon: 'error',
@@ -1240,34 +1696,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             const table = $('#tableDataTable');
             table.empty();
             
-            // Create header
-            let headerHtml = '<thead class="bg-gray-100"><tr>';
-            headerHtml += '<th class="px-4 py-2 text-left text-xs font-medium text-gray-700">Actions</th>';
+            let headerHtml = '<thead class="de-detail-thead"><tr class="text-[10px] font-bold text-emerald-900 uppercase tracking-tight border-b border-emerald-200/80">';
+            headerHtml += '<th class="px-3 py-2 text-left whitespace-nowrap">Del</th>';
             data.columns.forEach(col => {
-                headerHtml += `<th class="px-4 py-2 text-left text-xs font-medium text-gray-700">${col.Field}<br><span class="text-gray-500 font-normal">${col.Type}</span></th>`;
+                headerHtml += '<th class="px-3 py-2 text-left whitespace-nowrap">' + escapeHtml(col.Field) + '<br><span class="text-emerald-700/70 font-normal normal-case text-[9px]">' + escapeHtml(col.Type) + '</span></th>';
             });
             headerHtml += '</tr></thead>';
             table.append(headerHtml);
             
-            // Create body
-            let bodyHtml = '<tbody class="divide-y divide-gray-200">';
+            let bodyHtml = '<tbody class="divide-y divide-slate-100 bg-white">';
             data.data.forEach(row => {
-                bodyHtml += '<tr class="hover:bg-gray-50">';
-                bodyHtml += `<td class="px-4 py-2 whitespace-nowrap">
-                    <button onclick="deleteRecord(${row.id})" class="text-red-600 hover:text-red-800">
-                        <i class="fas fa-trash"></i>
-                    </button>
-                </td>`;
+                const pk = row.id !== undefined && row.id !== null ? row.id : '';
+                const canDel = pk !== '';
+                bodyHtml += '<tr class="hover:bg-emerald-50/30">';
+                bodyHtml += '<td class="px-3 py-1.5 whitespace-nowrap">' +
+                    (canDel ? '<button type="button" onclick="deleteRecord(' + pk + ')" class="text-rose-600 hover:text-rose-800 text-[10px]" title="Delete row"><i class="fas fa-trash-alt"></i></button>' : '—') +
+                    '</td>';
                 
                 data.columns.forEach(col => {
-                    const value = row[col.Field] !== null ? row[col.Field] : '';
+                    const value = row[col.Field] !== null && row[col.Field] !== undefined ? row[col.Field] : '';
                     const isAutoIncrement = col.Extra === 'auto_increment';
-                    const isEditable = !isAutoIncrement;
-                    
-                    bodyHtml += `<td class="px-4 py-2 whitespace-nowrap text-sm ${isEditable ? 'editable-cell cursor-pointer hover:bg-blue-50' : 'bg-gray-100'}" 
-                                    ${isEditable ? `onclick="editCell(this, ${row.id}, '${col.Field}')"` : ''}>
-                        ${value}
-                    </td>`;
+                    const isEditable = !isAutoIncrement && canDel;
+                    const escField = col.Field.replace(/'/g, "\\'");
+                    bodyHtml += '<td class="px-3 py-1.5 whitespace-nowrap text-slate-800 ' + (isEditable ? 'editable-cell cursor-pointer hover:bg-blue-50/80' : 'bg-slate-50/80 text-slate-500') + '"' +
+                        (isEditable ? ' onclick="editCell(this, ' + pk + ', \'' + escField + '\')"' : '') + '>' +
+                        escapeHtml(String(value)) + '</td>';
                 });
                 
                 bodyHtml += '</tr>';
@@ -1318,11 +1771,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             });
         }
         
-        // Delete record
         function deleteRecord(recordId) {
+            const extra = currentTable === 'transactions'
+                ? ' Linked rows in exchange_items, gold_sale_items, and gold_purchase_items will be removed automatically. Party/stock balances are not recalculated from here.'
+                : '';
             Swal.fire({
                 title: 'Are you sure?',
-                text: 'This record will be permanently deleted!',
+                text: 'This record will be permanently deleted.' + extra,
                 icon: 'warning',
                 showCancelButton: true,
                 confirmButtonColor: '#ef4444',
@@ -1417,10 +1872,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             });
         }
         
-        // Close table view
         function closeTableView() {
             $('#tableDataView').addClass('hidden');
-            $('#tablesList').removeClass('hidden');
+            $('#deListPanel').removeClass('hidden');
             currentTable = null;
             currentTableData = null;
         }
@@ -1460,9 +1914,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             });
         }
         
-        // Initialize
         $(document).ready(function() {
-            // Check current hash or default to company
+            $(document).on('click', '#deTabs [data-de-tab]', function() {
+                deActiveTab = $(this).attr('data-de-tab') || 'all';
+                renderDeTabs();
+                renderDeMasterBody();
+            });
+            $(document).on('click', '.de-open-table', function(e) {
+                e.stopPropagation();
+                const n = $(this).data('name');
+                if (n) viewTable(String(n));
+            });
+            $(document).on('dblclick', '#deMasterTableBody tr.de-master-row', function() {
+                const n = $(this).data('name');
+                if (n) viewTable(String(n));
+            });
+            $('#deFilterBtn').on('click', function() {
+                renderDeMasterBody();
+            });
+            $('#deTableSearch').on('keydown', function(e) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    renderDeMasterBody();
+                }
+            });
             const activeTab = 'company';
             showTab(activeTab);
         });
@@ -1485,6 +1960,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $('#profile_city').val(data.city);
                     $('#profile_state').val(data.state);
                     $('#profile_gstin').val(data.gstin);
+                    $('#profile_gold_rate_unit').val(data.gold_rate_unit || 'gram');
                     
                     companyDataLoaded = true;
                     loadCompanyBanks();
@@ -1626,7 +2102,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 city: $('#profile_city').val(),
                 state: $('#profile_state').val(),
                 gstin: $('#profile_gstin').val(),
-                pin: $('#profile_pin').val()
+                pin: $('#profile_pin').val(),
+                gold_rate_unit: $('#profile_gold_rate_unit').val()
             };
 
             Swal.fire({ title: 'Saving Profile...', allowOutsideClick: false, didOpen: () => Swal.showLoading() });

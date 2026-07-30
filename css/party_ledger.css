@@ -1,0 +1,330 @@
+/**
+ * Party Ledger — dedicated stylesheet.
+ * Builds on the shared Tailwind/gradient-card conventions from components/layout.php.
+ */
+
+/* ---------- Base / typography ---------- */
+
+.ledger-page-root {
+    font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-size: 13px;
+}
+
+.ledger-page-root .tabular-nums {
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Party search / list ---------- */
+
+#partyList {
+    overflow-x: hidden;
+}
+
+#partyList::-webkit-scrollbar {
+    width: 6px;
+}
+
+#partyList::-webkit-scrollbar:horizontal {
+    height: 0;
+}
+
+#partyList::-webkit-scrollbar-track {
+    background: #f1f1f1;
+}
+
+#partyList::-webkit-scrollbar-thumb {
+    background: #94a3b8;
+    border-radius: 3px;
+}
+
+#partyList::-webkit-scrollbar-thumb:hover {
+    background: #64748b;
+}
+
+.party-item {
+    min-width: 0;
+    max-width: 100%;
+}
+
+kbd {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 0.75rem;
+    line-height: 1.5;
+}
+
+/* ---------- Modals ---------- */
+
+#newPartyModal,
+#editPartyModal,
+#cutVowModal {
+    backdrop-filter: blur(2px);
+}
+
+#newPartyModal .bg-white,
+#editPartyModal .bg-white,
+#cutVowModal .bg-white {
+    animation: plModalSlideIn 0.2s ease-out;
+}
+
+@keyframes plModalSlideIn {
+    from {
+        opacity: 0;
+        transform: translateY(-20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+#newPartyModal input:focus,
+#newPartyModal textarea:focus,
+#newPartyModal button:focus,
+#editPartyModal input:focus,
+#editPartyModal textarea:focus,
+#editPartyModal button:focus,
+#cutVowModal input:focus,
+#cutVowModal button:focus {
+    outline: 2px solid #3b82f6;
+    outline-offset: 2px;
+}
+
+/* ---------- Dashboard: outstanding balance hero card ---------- */
+
+.pl-balance-card {
+    position: relative;
+    border-radius: 0.75rem;
+    padding: 1rem 1.25rem;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 4px 14px -4px rgba(15, 23, 42, 0.08);
+}
+
+.pl-balance-card.is-due {
+    background: linear-gradient(135deg, #fff1f2 0%, #ffe4e6 55%, #fecdd3 100%);
+}
+
+.pl-balance-card.is-credit {
+    background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 55%, #a7f3d0 100%);
+}
+
+.pl-balance-card.is-clear {
+    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 55%, #e2e8f0 100%);
+}
+
+.pl-balance-card .pl-balance-amount {
+    font-size: 1.9rem;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+}
+
+.pl-balance-card.is-due .pl-balance-amount {
+    color: #b91c1c;
+}
+
+.pl-balance-card.is-credit .pl-balance-amount {
+    color: #047857;
+}
+
+.pl-balance-card.is-clear .pl-balance-amount {
+    color: #334155;
+}
+
+.pl-balance-chip {
+    background: rgba(255, 255, 255, 0.65);
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    border-radius: 0.5rem;
+    padding: 0.25rem 0.6rem;
+}
+
+/* ---------- Dashboard: secondary metric cards ---------- */
+
+.pl-metric-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
+}
+
+@media (min-width: 768px) {
+    .pl-metric-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+@media (min-width: 1280px) {
+    .pl-metric-grid {
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+    }
+}
+
+.pl-metric-card {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.6rem;
+    padding: 0.55rem 0.65rem;
+    min-width: 0;
+    transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.pl-metric-card:hover {
+    border-color: #cbd5e1;
+    box-shadow: 0 2px 8px -2px rgba(15, 23, 42, 0.1);
+}
+
+.pl-metric-icon {
+    width: 1.35rem;
+    height: 1.35rem;
+    border-radius: 0.4rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 0.65rem;
+    color: #fff;
+}
+
+.pl-metric-value {
+    font-size: 0.8rem;
+    font-weight: 700;
+    line-height: 1.15;
+}
+
+.pl-metric-sub {
+    font-size: 0.62rem;
+    line-height: 1.2;
+    color: #64748b;
+    margin-top: 0.15rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0 0.35rem;
+}
+
+/* ---------- Tabs ---------- */
+
+.pl-tab-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.15rem;
+    background: #f1f5f9;
+    padding: 0.2rem;
+    border-radius: 0.55rem;
+}
+
+.pl-tab-btn {
+    flex: 1 1 auto;
+    min-width: 4.5rem;
+    padding: 0.35rem 0.5rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    border-radius: 0.45rem;
+    color: #2563eb;
+    background: #fff;
+    transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.pl-tab-btn:hover {
+    background: #eff6ff;
+}
+
+.pl-tab-btn.active {
+    background: #2563eb;
+    color: #fff;
+    box-shadow: 0 1px 3px rgba(37, 99, 235, 0.4);
+}
+
+/* ---------- Transaction tables ---------- */
+
+.compact-ledger-table th,
+.compact-ledger-table td {
+    padding: 0.2rem 0.35rem;
+    font-size: 0.68rem;
+    line-height: 1.3;
+}
+
+@media (min-width: 640px) {
+    .compact-ledger-table th,
+    .compact-ledger-table td {
+        font-size: 0.72rem;
+    }
+}
+
+.compact-ledger-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: inherit;
+}
+
+.compact-ledger-table tbody tr:nth-child(even) {
+    background-color: #f8fafc;
+}
+
+.compact-ledger-table tbody tr:hover {
+    background-color: #eff6ff;
+}
+
+.pl-type-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 999px;
+    font-size: 0.62rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.pl-type-badge.type-booking { background: #dbeafe; color: #1e40af; }
+.pl-type-badge.type-sale { background: #dcfce7; color: #15803d; }
+.pl-type-badge.type-purchase { background: #ede9fe; color: #6d28d9; }
+.pl-type-badge.type-exchange { background: #ffedd5; color: #c2410c; }
+.pl-type-badge.type-payment { background: #fef9c3; color: #854d0e; }
+.pl-type-badge.type-received { background: #fef9c3; color: #854d0e; }
+
+/* Cash / Bank method badges — used wherever a payment method needs a compact pill. */
+.pl-method-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 999px;
+    font-size: 0.62rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.pl-method-badge.cash { background: #d1fae5; color: #047857; }
+.pl-method-badge.bank { background: #e0e7ff; color: #4338ca; }
+
+/* Hide horizontal scrollbar but keep scrolling functionality */
+.hide-scrollbar-x {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+}
+
+.hide-scrollbar-x::-webkit-scrollbar {
+    display: none;
+    height: 0;
+}
+
+.hide-scrollbar-x::-webkit-scrollbar-track {
+    display: none;
+}
+
+.hide-scrollbar-x::-webkit-scrollbar-thumb {
+    display: none;
+}
+
+/* ---------- Sales / cash-bank sub tabs ---------- */
+
+.sales-sub-panel {
+    animation: plFadeIn 0.15s ease-out;
+}
+
+@keyframes plFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}

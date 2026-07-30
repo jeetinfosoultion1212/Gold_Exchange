@@ -1,5 +1,5 @@
 // Sale.php - Custom JavaScript for purity autocomplete and stock management
-// This overrides/extends gold_exchange.js for sale-specific functionality
+// This overrides/extends exchange.js for sale-specific functionality
 
 $(document).ready(function () {
     console.log('Sale.js loaded - initializing sale-specific features');
@@ -785,8 +785,8 @@ $(document).ready(function () {
         updatePaymentStatus(); // Reset payment status display
     });
     
-    // Load party dues when party is selected (override or extend gold_exchange.js selectParty)
-    // This will be called by gold_exchange.js selectParty function, but we ensure it works
+    // Load party dues when party is selected (override or extend exchange.js selectParty)
+    // This will be called by exchange.js selectParty function, but we ensure it works
     if (typeof loadPartyDues === 'undefined') {
         window.loadPartyDues = function(partyName) {
             console.log('loadPartyDues (sale.js fallback) called for:', partyName);

@@ -28,8 +28,10 @@ $current_page = basename($_SERVER['PHP_SELF']);
     <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     
-    <!-- Google Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <!-- Google Fonts: Inter primary UI; Poppins for accent headings -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Poppins:wght@500;600;700&display=swap" rel="stylesheet">
     
     <!-- SweetAlert2 -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/sweetalert2@11.0.18/dist/sweetalert2.min.css">
@@ -40,8 +42,8 @@ $current_page = basename($_SERVER['PHP_SELF']);
             theme: {
                 extend: {
         fontFamily: {
-            'sans': ['Poppins', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],
-            'poppins': ['Poppins', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'sans-serif'],
+            'sans': ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],
+            'poppins': ['Poppins', 'Inter', 'system-ui', 'sans-serif'],
         },
                     colors: {
                         'soft-blue': '#E0F2FE',
@@ -58,7 +60,10 @@ $current_page = basename($_SERVER['PHP_SELF']);
     <!-- Custom Styles -->
     <style>
         body {
-            font-family: 'Inter', sans-serif;
+            font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+            font-size: 14px;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
             background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
         }
         
@@ -226,7 +231,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
     <?php include 'components/header.php'; ?>
     
             <!-- Main Content Area -->
-            <div class="min-h-screen bg-gray-50 ml-16 pt-2">
+            <div class="min-h-screen bg-gray-50 main-with-sidebar pt-2">
                 <!-- Content will be inserted here -->
                 <main class="p-2 lg:p-3">
                     <?php if (isset($content)): ?>

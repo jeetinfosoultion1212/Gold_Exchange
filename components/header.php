@@ -16,7 +16,20 @@ $current_page = basename($_SERVER['PHP_SELF']);
 ?>
 
 <!-- Professional Dark Header (Enhanced & Responsive) -->
-<header class="bg-gradient-to-r from-slate-900 via-blue-900 to-slate-900 shadow-2xl border-b-2 border-blue-700/50 sticky top-0 z-50 ml-16">
+<style>
+    /* Sidebar is fixed w-16; main area must not exceed viewport (avoids horizontal page scroll + gap) */
+    html {
+        overflow-x: clip;
+    }
+    .main-with-sidebar {
+        margin-left: 4rem;
+        width: calc(100% - 4rem);
+        max-width: calc(100vw - 4rem);
+        min-width: 0;
+        box-sizing: border-box;
+    }
+</style>
+<header class="bg-gradient-to-r from-slate-900 via-blue-900 to-slate-900 shadow-2xl border-b-2 border-blue-700/50 sticky top-0 z-50 main-with-sidebar">
     <div class="max-w-full mx-auto px-2">
         <div class="flex justify-between items-center h-14"> <!-- Reduced height -->
             <!-- Left Side - Logo -->
@@ -49,11 +62,11 @@ $current_page = basename($_SERVER['PHP_SELF']);
                 <?php
                 $nav_items = [
                     ['book.php', 'blue', 'book', 'BOOK', 'F1'],
-                    ['gold_exchange.php', 'orange', 'exchange-alt', 'EXCH', 'F12'],
-                    ['sell_gold.php', 'green', 'shopping-cart', 'SELL', 'F2'],
+                    ['exchange.php', 'orange', 'exchange-alt', 'EXCH', 'F12'],
+                    ['sales.php', 'green', 'shopping-cart', 'SALES', 'F2'],
                     ['purchase.php', 'purple', 'shopping-basket', 'PURCH', 'F3'],
                     ['payment_receipt.php', 'emerald', 'money-bill-wave', 'RECEIVE', 'F4'],
-                    ['gold_receipt.php', 'yellow', 'coins', 'GOLD', 'F8'],
+                    ['personal_expense.php', 'yellow', 'wallet', 'EXPENSE', 'F8'],
                     ['payment_send.php', 'red', 'paper-plane', 'SEND', 'F11'],
                     ['party_ledger.php', 'pink', 'users', 'LEDGER', 'F6'],
                     ['report.php', 'teal', 'chart-line', 'REPORT', 'F9'],
@@ -169,7 +182,7 @@ document.addEventListener('keydown', function(event) {
     if (key === 'F2' || event.code === 'F2') {
         event.preventDefault();
         event.stopPropagation();
-        window.location.href = 'sell_gold.php';
+        window.location.href = 'sales.php';
         return;
     }
     if (key === 'F3' || event.code === 'F3') {
@@ -199,7 +212,7 @@ document.addEventListener('keydown', function(event) {
     if (key === 'F8' || event.code === 'F8') {
         event.preventDefault();
         event.stopPropagation();
-        window.location.href = 'gold_receipt.php';
+        window.location.href = 'personal_expense.php';
         return;
     }
     if (key === 'F9' || event.code === 'F9') {
@@ -217,7 +230,7 @@ document.addEventListener('keydown', function(event) {
     if (key === 'F12' || event.code === 'F12') {
         event.preventDefault();
         event.stopPropagation();
-        window.location.href = 'gold_exchange.php';
+        window.location.href = 'exchange.php';
         return;
     }
 }, true); // Use capture phase to catch events earlier

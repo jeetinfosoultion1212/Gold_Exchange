@@ -114,8 +114,11 @@ const BookGoldForm = (() => {
     }
     function calcTotal() {
         const weight = parseFloat(weightInput.value) || 0;
-        const rate = parseFloat(rateInput.value) || 0;
-        totalInput.value = weight && rate ? Utils.formatCurrency(weight * rate) : '';
+        const displayRate = parseFloat(rateInput.value) || 0;
+        const ratePerGram = (window.GoldRateUtils && GoldRateUtils.effectivePerGram)
+            ? GoldRateUtils.effectivePerGram(displayRate)
+            : displayRate;
+        totalInput.value = weight && displayRate ? Utils.formatCurrency(weight * ratePerGram) : '';
     }
 
     /** Simple validation and feedback */
@@ -268,7 +271,7 @@ const BookGoldForm = (() => {
                 <div style="text-align: left; padding: 10px;">
                     <p style="margin-bottom: 10px;"><strong>Party:</strong> ${partyName}</p>
                     <p style="margin-bottom: 10px;"><strong>Weight:</strong> ${weight} g</p>
-                    <p style="margin-bottom: 10px;"><strong>Rate:</strong> ₹${rate}/g</p>
+                    <p style="margin-bottom: 10px;"><strong>Rate:</strong> ${(window.GoldRateUtils ? GoldRateUtils.formatRateText(rate, 2) : '₹' + rate + '/g')}</p>
                     <p style="margin-bottom: 10px;"><strong>Total:</strong> ${total}</p>
                     <p><strong>Type:</strong> ${bookingType || 'Cash'}</p>
                 </div>
@@ -356,7 +359,7 @@ const BookGoldForm = (() => {
                         </div>
                         <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
                             <span style="color: #666;">Rate:</span>
-                            <span>₹${parseFloat(bookingData?.rate || 0).toLocaleString('en-IN', {minimumFractionDigits: 2})}/g</span>
+                            <span>${window.GoldRateUtils ? GoldRateUtils.formatRateText(bookingData?.rate || 0, 2) : '₹' + parseFloat(bookingData?.rate || 0).toLocaleString('en-IN', {minimumFractionDigits: 2}) + '/g'}</span>
                         </div>
                         <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
                             <span style="color: #666;">Booking Type:</span>
@@ -490,7 +493,7 @@ const BookGoldForm = (() => {
             `Party: *${bookingData.party_name}*\n\n` +
             `Weight: ${parseFloat(bookingData.booking_weight).toFixed(3)} g\n` +
             `Purity: ${parseFloat(bookingData.purity).toFixed(2)}%\n` +
-            `Rate: ₹${parseFloat(bookingData.rate).toLocaleString('en-IN', {minimumFractionDigits: 2})}/g\n` +
+            `Rate: ${window.GoldRateUtils ? GoldRateUtils.formatRateText(bookingData.rate, 2) : '₹' + parseFloat(bookingData.rate).toLocaleString('en-IN', {minimumFractionDigits: 2}) + '/g'}\n` +
             `Booking Type: ${bookingData.booking_type || 'Cash'}\n\n` +
             `Total Amount: *₹${totalAmount.toLocaleString('en-IN', {minimumFractionDigits: 2})}*\n` +
             (totalReceived > 0 ? `Received: ₹${totalReceived.toLocaleString('en-IN', {minimumFractionDigits: 2})}\n` : '') +
@@ -647,7 +650,7 @@ function printBookingReceipt(bookingData, companyName) {
                 </div>
                 <div class="receipt-row">
                     <span class="receipt-label">Rate:</span>
-                    <span>₹${parseFloat(bookingData.rate).toLocaleString('en-IN', {minimumFractionDigits: 2})}/g</span>
+                    <span>${window.GoldRateUtils ? GoldRateUtils.formatRateText(bookingData.rate, 2) : '₹' + parseFloat(bookingData.rate).toLocaleString('en-IN', {minimumFractionDigits: 2}) + '/g'}</span>
                 </div>
                 <div class="receipt-row">
                     <span class="receipt-label">Type:</span>
@@ -1163,7 +1166,7 @@ const TransactionsTable = (() => {
 
     function printTransaction(tr) {
         // Get receipt ID from the row
-        const receiptId = tr.querySelector('.font-mono')?.textContent.trim() || tr.getAttribute('data-receipt-id');
+        const receiptId = tr.getAttribute('data-receipt-id') || tr.querySelector('.font-mono')?.textContent.trim().replace(/^#/, '');
         if (!receiptId) {
             Swal.fire('Error', 'Receipt ID not found', 'error');
             return;
@@ -1283,7 +1286,7 @@ const TransactionsTable = (() => {
     }
 
     function deleteTransaction(tr) {
-        const receiptId = tr.querySelector('.font-mono')?.textContent.trim();
+        const receiptId = tr.getAttribute('data-receipt-id') || tr.querySelector('.font-mono')?.textContent.trim().replace(/^#/, '');
         if (!receiptId) return;
         Swal.fire({
             title: `Delete transaction ${receiptId}?`,
@@ -1304,9 +1307,9 @@ const TransactionsTable = (() => {
     }
 
     function shareTransaction(tr) {
-        const receiptId = tr.querySelector('.font-mono')?.textContent.trim();
+        const receiptId = tr.getAttribute('data-receipt-id') || tr.querySelector('.font-mono')?.textContent.trim().replace(/^#/, '');
         const party = tr.querySelector('td:nth-child(2)')?.textContent.trim();
-        const amount = tr.querySelector('td:nth-child(4) .font-bold')?.textContent.trim();
+        const amount = tr.querySelector('td:nth-child(5) .font-bold')?.textContent.trim();
         const text = `Transaction: ${receiptId}\nParty: ${party}\nAmount: ${amount}`;
         navigator.clipboard.writeText(text)
             .then(() => {

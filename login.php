@@ -3,7 +3,7 @@ session_start();
 
 // Check if user is already logged in
 if (isset($_SESSION['user_id'])) {
-    header('Location: gold_exchange.php');
+    header('Location: exchange.php');
     exit;
 }
 
@@ -69,7 +69,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $update_stmt->bind_param("i", $user['id']);
             $update_stmt->execute();
             
-            header('Location: gold_exchange.php');
+            header('Location: exchange.php');
             exit;
             }
         }
@@ -106,7 +106,7 @@ if (!isset($_SESSION['user_id']) && isset($_COOKIE['remember_token'])) {
             $_SESSION['company_name'] = $user['company_name'];
             $_SESSION['role'] = $user['role'];
             
-            header('Location: gold_exchange.php');
+            header('Location: exchange.php');
             exit;
         }
     }

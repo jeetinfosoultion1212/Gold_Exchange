@@ -1,5 +1,5 @@
 // Gold Exchange - Print Receipt Function
-// Add this to the end of gold_exchange.js
+// Add this to the end of exchange.js
 
 /**
  * Print exchange receipt (thermal printer compatible)
@@ -8,6 +8,10 @@ function printExchangeReceipt(exchangeData, companyName) {
     const transactionDate = exchangeData.date_of_transaction
         ? new Date(exchangeData.date_of_transaction).toLocaleString('en-IN')
         : new Date().toLocaleString('en-IN');
+
+    const amountVal = parseFloat(exchangeData.amount) || 0;
+    const paidVal = parseFloat(exchangeData.payment_amount) || 0;
+    const balanceVal = Math.max(0, parseFloat(exchangeData.due_amount ?? (amountVal - paidVal)) || 0);
 
     const printContent = `
         <!DOCTYPE html>
@@ -154,11 +158,15 @@ function printExchangeReceipt(exchangeData, companyName) {
                 <div class="receipt-section">
                     <div class="receipt-row">
                         <span class="receipt-label">Amount:</span>
-                        <span class="receipt-value" style="font-size: 12pt;">₹${parseFloat(exchangeData.amount).toLocaleString('en-IN')}</span>
+                        <span class="receipt-value" style="font-size: 12pt;">₹${amountVal.toLocaleString('en-IN')}</span>
                     </div>
                     <div class="receipt-row">
                         <span class="receipt-label">${exchangeData.payment_type === 'Payment_In' ? 'Received' : 'Paid'}:</span>
-                        <span style="color: ${exchangeData.payment_type === 'Payment_In' ? '#28a745' : '#dc3545'};">₹${parseFloat(exchangeData.payment_amount).toLocaleString('en-IN')}</span>
+                        <span style="color: ${exchangeData.payment_type === 'Payment_In' ? '#28a745' : '#dc3545'};">₹${paidVal.toLocaleString('en-IN')}</span>
+                    </div>
+                    <div class="receipt-row">
+                        <span class="receipt-label">Balance:</span>
+                        <span class="receipt-value">₹${balanceVal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                     </div>
                     <div class="receipt-row">
                         <span class="receipt-label">Payment Method:</span>

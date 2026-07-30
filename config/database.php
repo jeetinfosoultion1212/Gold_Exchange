@@ -23,9 +23,9 @@ if ($is_desktop_app) {
     // PRODUCTION - HOSTINGER
     // ============================================
     $db_host = 'localhost';
-    $db_name = 'u176143338_mormukut';
-    $db_user = 'u176143338_mormukut';
-    $db_pass = 'Mahalaxmi1234@#';
+    $db_name = 'u176143338_gold_exhange';
+    $db_user = 'u176143338_gold_exhange';
+    $db_pass = 'Suniprosern25@#';
     $db_port = 3306;
     
 } else {

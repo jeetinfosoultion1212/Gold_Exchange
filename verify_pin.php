@@ -53,7 +53,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         unset($_SESSION['temp_user']);
         unset($_SESSION['temp_remember']);
         
-        header('Location: gold_exchange.php');
+        header('Location: exchange.php');
         exit;
     } else {
         $error = "Invalid PIN entered. Please try again.";

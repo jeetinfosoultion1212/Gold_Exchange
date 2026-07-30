@@ -57,7 +57,20 @@ const KeyboardNavigationGeneric = (() => {
 
             // Setup keyboard event listeners
             field.addEventListener('keydown', (e) => handleKeyDown(e, fieldName));
-            field.addEventListener('blur', (e) => validateField(fieldName, field));
+            // Party typeahead: blur fires before mousedown/click on the suggestion row, so
+            // validating synchronously clears party_id as "invalid" even after a valid pick.
+            // Defer one tick so select handlers run first.
+            field.addEventListener('blur', (e) => {
+                if (fieldName === 'partyNameInput' || fieldName === 'party_name' || fieldName === 'pePartyName') {
+                    // Delay so mousedown/click on the suggestion list can set #partyId first
+                    setTimeout(() => {
+                        const f = fields[fieldName];
+                        if (f) validateField(fieldName, f);
+                    }, 120);
+                    return;
+                }
+                validateField(fieldName, field);
+            });
             field.addEventListener('input', (e) => clearValidationError(fieldName));
 
             // Special handling for dropdowns
@@ -127,8 +140,9 @@ const KeyboardNavigationGeneric = (() => {
             }
 
             // For party name with dropdown
-            if (fieldName === 'partyNameInput' || fieldName === 'party_name') {
-                const partyList = document.getElementById('partyList');
+            if (fieldName === 'partyNameInput' || fieldName === 'party_name' || fieldName === 'pePartyName') {
+                const partyListId = fieldName === 'pePartyName' ? 'pePartyList' : 'partyList';
+                const partyList = document.getElementById(partyListId);
                 if (partyList && !partyList.classList.contains('hidden')) {
                     // Dropdown is open, let party search handle it
                     return;
@@ -470,9 +484,9 @@ const KeyboardNavigationGeneric = (() => {
         }
 
         // Party name validation (must have party_id)
-        if ((fieldName === 'partyNameInput' || fieldName === 'party_name') && field.value) {
-            const partyId = document.getElementById('partyId');
-            if (!partyId || !partyId.value) {
+        if ((fieldName === 'partyNameInput' || fieldName === 'party_name' || fieldName === 'pePartyName') && field.value) {
+            const partyIdEl = fieldName === 'pePartyName' ? document.getElementById('pePartyId') : document.getElementById('partyId');
+            if (!partyIdEl || !partyIdEl.value) {
                 isValid = false;
                 errorMessage = 'Please select a party from the list';
             }
@@ -564,6 +578,7 @@ const KeyboardNavigationGeneric = (() => {
             'date_of_transaction': 'Date',
             'partyNameInput': 'Party Name',
             'party_name': 'Party Name',
+            'pePartyName': 'Party',
             'sell_weight': 'Weight',
             'purchase_weight': 'Weight',
             'booking_weight': 'Weight',
@@ -582,7 +597,8 @@ const KeyboardNavigationGeneric = (() => {
             'bank_amount': 'Bank Amount',
             'additional_cash': 'Cash Received',
             'additional_bank': 'Bank Received',
-            'bank_payment_type': 'Bank Payment Type'
+            'bank_payment_type': 'Bank Payment Type',
+            'purchasePaymentMethodSelect': 'Payment method'
         };
         return labels[fieldName] || fieldName;
     }

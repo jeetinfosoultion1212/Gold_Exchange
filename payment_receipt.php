@@ -20,6 +20,52 @@ ini_set('error_log', __DIR__ . '/php_error.log');
 
 // Load database configuration
 require_once __DIR__ . '/config/database.php';
+require_once __DIR__ . '/handlers/account_balance_helper.php';
+
+/** Map payment_method to account_balances.account_type ('Cash' | 'Bank') */
+function payment_receipt_account_type(string $payment_method): string {
+    return (strcasecmp(trim($payment_method), 'Cash') === 0) ? 'Cash' : 'Bank';
+}
+
+/**
+ * Label shown in payment lists: keep real PAY* receipt_id; legacy rows (e.g. CSH-*) use PAY# + transaction id.
+ */
+function payment_receipt_list_display_id(array $t): string {
+    $rid = trim((string)($t['receipt_id'] ?? ''));
+    if ($rid !== '' && preg_match('/^PAY/i', $rid)) {
+        return $rid;
+    }
+    return 'PAY#' . (int)($t['id'] ?? 0);
+}
+
+function payment_receipt_party_id_int(array $t): int {
+    if (!array_key_exists('party_id', $t) || $t['party_id'] === null || $t['party_id'] === '') {
+        return 0;
+    }
+    return (int) $t['party_id'];
+}
+
+/**
+ * Customer column + form hint: real party shows name + "Party #id"; internal cash rows (NULL party) use narration.
+ *
+ * @return array{name: string, sub: string}
+ */
+function payment_receipt_party_display_lines(array $t): array {
+    $pid = payment_receipt_party_id_int($t);
+    $pname = trim((string)($t['party_name'] ?? ''));
+    if ($pid > 0) {
+        $name = $pname !== '' ? $pname : ('Party #' . $pid);
+        $sub = 'Party #' . $pid;
+        $c = trim((string)($t['party_contact'] ?? ''));
+        if ($c !== '') {
+            $sub .= ' · ' . $c;
+        }
+        return ['name' => $name, 'sub' => $sub];
+    }
+    $n = trim((string)($t['narration'] ?? ''));
+    $name = $n !== '' ? (strlen($n) > 36 ? substr($n, 0, 34) . '…' : $n) : 'Internal (no party)';
+    return ['name' => $name, 'sub' => 'No party linked'];
+}
 
 if ($conn->connect_error) {
     die('Database connection failed: ' . $conn->connect_error . '. Please run setup_database.php first.');
@@ -45,7 +91,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             case 'search_parties':
                 $search = $conn->real_escape_string($_POST['term']);
                 $sql = "SELECT DISTINCT p.id, p.party_name, p.address, p.contact_no,
-                        p.current_balance, p.cash_balance, p.bank_balance,
+                        p.cash_balance, p.bank_balance, p.gold_balance, p.silver_balance,
                         COALESCE(SUM(CASE WHEN t.transaction_type = 'Booking' THEN t.gold_weight ELSE 0 END), 0) as booked_weight,
                         COALESCE(SUM(CASE WHEN t.transaction_type = 'Sale' THEN t.gold_weight ELSE 0 END), 0) as sold_weight,
                         COALESCE(SUM(CASE WHEN t.transaction_type = 'Booking' THEN t.gold_amount ELSE 0 END), 0) as booked_amount,
@@ -60,7 +106,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         FROM parties p 
                         LEFT JOIN transactions t ON p.id = t.party_id AND t.company_id = $company_id
                         WHERE p.company_id = $company_id AND p.party_name LIKE '%$search%' 
-                        GROUP BY p.id, p.party_name, p.address, p.contact_no, p.current_balance, p.cash_balance, p.bank_balance
+                        GROUP BY p.id, p.party_name, p.address, p.contact_no, p.cash_balance, p.bank_balance, p.gold_balance, p.silver_balance
                         ORDER BY p.party_name
                         LIMIT 10";
                 $result = $conn->query($sql);
@@ -85,16 +131,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'available_weight' => number_format($available_weight, 2),
                         'booked_amount' => number_format($booked_amount, 2),
                         'total_due' => number_format($total_due, 2),
-                        'remaining_amount' => $row['current_balance'], // Use actual current_balance from parties table (no formatting)
+                        'remaining_amount' => floatval($row['cash_balance']) + floatval($row['bank_balance']),
                         'cash_due' => number_format($cash_due, 2),
                         'bank_due' => number_format($bank_due, 2),
                         'cash_received' => number_format($row['cash_received'], 2),
                         'bank_received' => number_format($row['bank_received'], 2),
                         'total_received' => number_format($row['cash_received'] + $row['bank_received'], 2),
                         // Add actual balance information from parties table
-                        'current_balance' => floatval($row['current_balance']),
+                        'current_balance' => floatval($row['cash_balance']) + floatval($row['bank_balance']),
                         'cash_balance' => floatval($row['cash_balance']),
-                        'bank_balance' => floatval($row['bank_balance'])
+                        'bank_balance' => floatval($row['bank_balance']),
+                        'gold_balance' => floatval($row['gold_balance'] ?? 0),
+                        'silver_balance' => floatval($row['silver_balance'] ?? 0),
+                        'total_due_amount' => floatval($row['cash_balance']) + floatval($row['bank_balance']),
+                        'total_due_gold' => floatval($row['gold_balance'] ?? 0),
+                        'total_due_silver' => floatval($row['silver_balance'] ?? 0)
                     ];
                 }
                 echo json_encode($parties);
@@ -104,9 +155,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $party_id = intval($_POST['party_id']);
                 
                 // Get balance information from parties table
-                $party_sql = "SELECT current_balance, cash_balance, bank_balance FROM parties WHERE id = $party_id AND company_id = $company_id";
+                $party_sql = "SELECT cash_balance, bank_balance FROM parties WHERE id = $party_id AND company_id = $company_id";
                 $party_result = $conn->query($party_sql);
-                $party_data = $party_result->fetch_assoc();
+                $party_data = $party_result ? ($party_result->fetch_assoc() ?: []) : [];
+                $party_ledger_total = floatval($party_data['cash_balance'] ?? 0) + floatval($party_data['bank_balance'] ?? 0);
                 
                 $sql = "SELECT 
                         COALESCE(SUM(CASE WHEN t.transaction_type = 'Booking' THEN t.gold_weight ELSE 0 END), 0) as booked_weight,
@@ -148,7 +200,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'bank_due' => floatval($bank_due),
                         'total_due' => floatval($total_due),
                         // Add balance information from parties table
-                        'current_balance' => floatval($party_data['current_balance'] ?? 0),
+                        'current_balance' => $party_ledger_total,
                         'cash_balance' => floatval($party_data['cash_balance'] ?? 0),
                         'bank_balance' => floatval($party_data['bank_balance'] ?? 0),
                         'balance_breakdown' => [
@@ -175,6 +227,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'cash_due' => 0,
                         'bank_due' => 0,
                         'total_due' => 0,
+                        'current_balance' => $party_ledger_total,
+                        'cash_balance' => floatval($party_data['cash_balance'] ?? 0),
+                        'bank_balance' => floatval($party_data['bank_balance'] ?? 0),
                         'balance_breakdown' => [
                             'cash_booked' => 0,
                             'cash_received' => 0,
@@ -207,6 +262,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 
                 if ($result && $result->num_rows > 0) {
                     $transaction = $result->fetch_assoc();
+                    $pl = payment_receipt_party_display_lines($transaction);
+                    $transaction['party_label'] = $pl['name'];
+                    $transaction['party_sub'] = $pl['sub'];
                     echo json_encode(['status' => 'success', 'data' => $transaction]);
                 } else {
                     echo json_encode(['status' => 'error', 'message' => 'Transaction not found']);
@@ -241,16 +299,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $original_method = $original_trans['payment_method'];
                     $original_party_id = $original_trans['party_id'];
                     
-                    // Reverse original payment (add back to balance)
+                    // Reverse original payment (add back to party balance + reduce company cash/bank)
                     if ($original_method == 'Cash') {
                         $reverse_sql = "UPDATE parties SET cash_balance = cash_balance + $original_amount WHERE id = $original_party_id";
                     } else {
                         $reverse_sql = "UPDATE parties SET bank_balance = bank_balance + $original_amount WHERE id = $original_party_id";
                     }
                     $conn->query($reverse_sql);
-                    
-                    // Update current_balance
-                    $conn->query("UPDATE parties SET current_balance = cash_balance + bank_balance WHERE id = $original_party_id");
+                    if (!updateAccountBalance($conn, $company_id, payment_receipt_account_type((string) $original_method), -$original_amount)) {
+                        throw new Exception('Error reversing company account balance');
+                    }
                     
                     // Determine booking_type
                     $booking_type = (strtolower($payment_method) === 'cash') ? 'Cash' : 'Bank';
@@ -271,25 +329,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         throw new Exception('Error updating transaction: ' . $conn->error);
                     }
                     
-                    // Apply new payment (deduct from balance)
+                    // Apply new payment (deduct from party balance + increase company cash/bank)
                     if ($payment_method == 'Cash') {
                         $apply_sql = "UPDATE parties SET cash_balance = cash_balance - $payment_amount WHERE id = $party_id";
                     } else {
                         $apply_sql = "UPDATE parties SET bank_balance = bank_balance - $payment_amount WHERE id = $party_id";
                     }
                     $conn->query($apply_sql);
-                    
-                    // Update current_balance
-                    $conn->query("UPDATE parties SET current_balance = cash_balance + bank_balance WHERE id = $party_id");
+                    if (!updateAccountBalance($conn, $company_id, payment_receipt_account_type($payment_method), $payment_amount)) {
+                        throw new Exception('Error updating company account balance');
+                    }
                     
                     $conn->commit();
                     
+                    header('Content-Type: application/json; charset=utf-8');
                     echo json_encode([
                         'status' => 'success',
                         'message' => 'Payment receipt updated successfully'
                     ]);
                 } catch (Exception $e) {
                     $conn->rollback();
+                    header('Content-Type: application/json; charset=utf-8');
                     echo json_encode([
                         'status' => 'error',
                         'message' => 'Error updating payment: ' . $e->getMessage()
@@ -350,10 +410,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                     
                     // Debug: Check balances before update
-                    $debug_before_sql = "SELECT current_balance, cash_balance, bank_balance FROM parties WHERE id = $party_id";
+                    $debug_before_sql = "SELECT cash_balance, bank_balance FROM parties WHERE id = $party_id";
                     $debug_before_result = $conn->query($debug_before_sql);
-                    $debug_before_data = $debug_before_result->fetch_assoc();
-                    error_log("Before payment update - Party ID: $party_id, Current: {$debug_before_data['current_balance']}, Cash: {$debug_before_data['cash_balance']}, Bank: {$debug_before_data['bank_balance']}, Payment Amount: $payment_amount");
+                    $debug_before_data = $debug_before_result ? $debug_before_result->fetch_assoc() : [];
+                    $dbg_tot = floatval($debug_before_data['cash_balance'] ?? 0) + floatval($debug_before_data['bank_balance'] ?? 0);
+                    error_log("Before payment update - Party ID: $party_id, Ledger (cash+bank): $dbg_tot, Cash: {$debug_before_data['cash_balance']}, Bank: {$debug_before_data['bank_balance']}, Payment Amount: $payment_amount");
                     
                     // Update party balances - separate cash and bank
                     // Payment received reduces the party's debt to us (subtract from positive balance)
@@ -371,20 +432,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         throw new Exception("Error updating party balance: " . $conn->error);
                     }
                     
-                    // Update current_balance as sum of cash + bank balances
-                    $update_current_balance_sql = "UPDATE parties SET 
-                        current_balance = cash_balance + bank_balance
-                        WHERE id = $party_id";
-                    
-                    if (!$conn->query($update_current_balance_sql)) {
-                        throw new Exception("Error updating current balance: " . $conn->error);
+                    // Company cash in hand / bank (account_balances) — money received increases shop balance
+                    $acct_type = payment_receipt_account_type($payment_method);
+                    if (!updateAccountBalance($conn, $company_id, $acct_type, $payment_amount)) {
+                        throw new Exception('Error updating company cash/bank balance');
                     }
                     
                     // Debug: Check the updated balances
-                    $debug_sql = "SELECT current_balance, cash_balance, bank_balance FROM parties WHERE id = $party_id";
+                    $debug_sql = "SELECT cash_balance, bank_balance FROM parties WHERE id = $party_id";
                     $debug_result = $conn->query($debug_sql);
-                    $debug_data = $debug_result->fetch_assoc();
-                    error_log("After payment update - Party ID: $party_id, Current: {$debug_data['current_balance']}, Cash: {$debug_data['cash_balance']}, Bank: {$debug_data['bank_balance']}");
+                    $debug_data = $debug_result ? $debug_result->fetch_assoc() : [];
+                    $dbg_a = floatval($debug_data['cash_balance'] ?? 0) + floatval($debug_data['bank_balance'] ?? 0);
+                    error_log("After payment update - Party ID: $party_id, Ledger (cash+bank): $dbg_a, Cash: {$debug_data['cash_balance']}, Bank: {$debug_data['bank_balance']}");
                     
                     // Get party details for response
                     $party_sql = "SELECT party_name, contact_no FROM parties WHERE id = $party_id";
@@ -416,6 +475,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'status' => 'error',
                         'message' => $e->getMessage()
                     ]);
+                }
+                exit;
+
+            case 'save_party':
+                $party_name = trim($_POST['party_name'] ?? '');
+                $address = trim($_POST['address'] ?? '');
+                $contact_no = trim($_POST['contact_no'] ?? '');
+                $gstin = trim($_POST['gstin'] ?? '') ?: 'N/A';
+                $state = trim($_POST['state'] ?? '');
+                $city = trim($_POST['city'] ?? '');
+                $bank_name = trim($_POST['bank_name'] ?? '');
+                $account_no = trim($_POST['account_no'] ?? '');
+                $ifsc_code = trim($_POST['ifsc_code'] ?? '');
+                $cash_balance = floatval($_POST['cash_balance'] ?? 0);
+                $bank_balance = floatval($_POST['bank_balance'] ?? 0);
+                $gold_balance = floatval($_POST['gold_balance'] ?? $_POST['cash_gold_balance'] ?? 0);
+                $silver_balance = floatval($_POST['silver_balance'] ?? $_POST['cash_silver_balance'] ?? 0);
+                if ($party_name === '') {
+                    echo json_encode(['status' => 'error', 'message' => 'Party name is required']);
+                    exit;
+                }
+                $sql = "INSERT INTO parties (company_id, party_name, address, contact_no, gstin, state, city, bank_name, account_no, ifsc_code, cash_balance, bank_balance, gold_balance, silver_balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                $stmt = $conn->prepare($sql);
+                $stmt->bind_param("isssssssssdddd", $company_id, $party_name, $address, $contact_no, $gstin, $state, $city, $bank_name, $account_no, $ifsc_code, $cash_balance, $bank_balance, $gold_balance, $silver_balance);
+                if ($stmt->execute()) {
+                    echo json_encode([
+                        'status' => 'success',
+                        'message' => 'Party added successfully',
+                        'party_id' => $stmt->insert_id
+                    ]);
+                } else {
+                    echo json_encode(['status' => 'error', 'message' => 'Error adding party: ' . $stmt->error]);
                 }
                 exit;
                 
@@ -453,7 +544,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 
             case 'get_receipt_list':
                 // Fetch recent payment receipts for dropdown
-                $list_sql = "SELECT t.id, t.receipt_id, t.date_of_transaction, t.payment_amount, t.payment_method, p.party_name
+                $list_sql = "SELECT t.id, t.party_id, t.narration, t.receipt_id, t.date_of_transaction, t.payment_amount, t.payment_method,
+                            p.party_name, p.contact_no AS party_contact
                             FROM transactions t
                             LEFT JOIN parties p ON t.party_id = p.id
                             WHERE (t.transaction_type = 'Payment' OR t.transaction_type = 'Received') 
@@ -467,6 +559,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($list_result) {
                     $receipts = [];
                     while ($row = $list_result->fetch_assoc()) {
+                        $row['display_receipt_id'] = payment_receipt_list_display_id($row);
+                        $pl = payment_receipt_party_display_lines($row);
+                        $row['party_list_name'] = $pl['name'];
+                        $row['party_list_sub'] = $pl['sub'];
                         $receipts[] = $row;
                     }
                     
@@ -518,8 +614,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         throw new Exception("Error updating party balance");
                     }
                     
-                    // Update total current balance
-                    $conn->query("UPDATE parties SET current_balance = cash_balance + bank_balance WHERE id = $party_id");
+                    // Reverse company balance (payment had increased cash/bank when recorded)
+                    if (!updateAccountBalance($conn, $company_id, payment_receipt_account_type((string) $method), -$amount)) {
+                        throw new Exception('Error reversing company account balance');
+                    }
                     
                     // Delete transaction
                     $conn->query("DELETE FROM transactions WHERE id = $transaction_id");
@@ -536,14 +634,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// Enhanced statistics SQL query for payment page
-// Get today's payment statistics from transactions
+// Stats: company cash/bank (account_balances) + today's receipts + receivable from parties
+$stats = [
+    'cash_in_hand' => 0.0,
+    'bank_balance' => 0.0,
+    'total_cash_received' => 0.0,
+    'total_bank_received' => 0.0,
+    'total_outstanding' => 0.0,
+];
+
 $payment_stats_sql = "
 SELECT 
-    SUM(CASE WHEN payment_method = 'Cash' THEN payment_amount ELSE 0 END) AS total_cash_received,
-    SUM(CASE WHEN payment_method = 'Bank' THEN payment_amount ELSE 0 END) AS total_bank_received,
-    SUM(payment_amount) AS total_payments_received,
-    COUNT(*) AS total_payment_transactions
+    COALESCE(SUM(CASE WHEN payment_method = 'Cash' THEN payment_amount ELSE 0 END), 0) AS total_cash_received,
+    COALESCE(SUM(CASE WHEN payment_method IN ('Bank', 'UPI', 'Cheque', 'Card') THEN payment_amount ELSE 0 END), 0) AS total_bank_received
 FROM transactions
 WHERE (transaction_type = 'Payment' OR transaction_type = 'Received')
 AND payment_type = 'Payment_In'
@@ -551,34 +654,31 @@ AND DATE(date_of_transaction) = CURRENT_DATE
 AND company_id = $company_id";
 
 $payment_stats_result = $conn->query($payment_stats_sql);
-$payment_stats = $payment_stats_result ? $payment_stats_result->fetch_assoc() : [];
+if ($payment_stats_result && ($pr = $payment_stats_result->fetch_assoc())) {
+    $stats['total_cash_received'] = (float) ($pr['total_cash_received'] ?? 0);
+    $stats['total_bank_received'] = (float) ($pr['total_bank_received'] ?? 0);
+}
 
-// Get outstanding amounts from parties table
 $outstanding_stats_sql = "
 SELECT 
-    SUM(CASE WHEN current_balance > 0 THEN current_balance ELSE 0 END) AS total_outstanding,
-    SUM(CASE WHEN cash_balance > 0 THEN cash_balance ELSE 0 END) AS total_cash_outstanding,
-    SUM(CASE WHEN bank_balance > 0 THEN bank_balance ELSE 0 END) AS total_bank_outstanding
+    COALESCE(SUM(GREATEST(0, cash_balance + bank_balance)), 0) AS total_outstanding
 FROM parties
 WHERE company_id = $company_id";
 
 $outstanding_stats_result = $conn->query($outstanding_stats_sql);
-$outstanding_stats = $outstanding_stats_result ? $outstanding_stats_result->fetch_assoc() : [];
+if ($outstanding_stats_result && ($os = $outstanding_stats_result->fetch_assoc())) {
+    $stats['total_outstanding'] = (float) ($os['total_outstanding'] ?? 0);
+}
 
-// Combine the results
-$stats = array_merge($payment_stats, $outstanding_stats);
-
-// Set default values if no data
-if (empty($stats)) {
-    $stats = [
-        'total_cash_received' => 0,
-        'total_bank_received' => 0,
-        'total_payments_received' => 0,
-        'total_payment_transactions' => 0,
-        'total_outstanding' => 0,
-        'total_cash_outstanding' => 0,
-        'total_bank_outstanding' => 0
-    ];
+$balance_sql = "SELECT 
+    COALESCE(SUM(CASE WHEN account_type = 'Cash' THEN current_balance ELSE 0 END), 0) AS cash_in_hand,
+    COALESCE(SUM(CASE WHEN account_type = 'Bank' THEN current_balance ELSE 0 END), 0) AS bank_balance
+FROM account_balances
+WHERE company_id = $company_id";
+$balance_result = $conn->query($balance_sql);
+if ($balance_result && ($br = $balance_result->fetch_assoc())) {
+    $stats['cash_in_hand'] = (float) ($br['cash_in_hand'] ?? 0);
+    $stats['bank_balance'] = (float) ($br['bank_balance'] ?? 0);
 }
 
 // Get recent payment transactions
@@ -589,9 +689,9 @@ $offset = ($page - 1) * $limit;
 $search = isset($_GET['search']) ? $conn->real_escape_string($_GET['search']) : '';
 $where_clause = $search ? "AND (p.party_name LIKE '%$search%' OR t.receipt_id LIKE '%$search%')" : '';
 
-$transactions_sql = "SELECT t.*, p.party_name, p.contact_no as party_contact 
+$transactions_sql = "SELECT t.*, p.party_name, p.contact_no AS party_contact 
                     FROM transactions t 
-                    LEFT JOIN parties p ON t.party_id = p.id
+                    LEFT JOIN parties p ON t.party_id = p.id AND p.company_id = t.company_id
                     WHERE (t.transaction_type = 'Payment' OR t.transaction_type = 'Received')
                     AND t.payment_type = 'Payment_In'
                     AND t.company_id = $company_id
@@ -605,7 +705,7 @@ $transactions = $conn->query($transactions_sql);
 $total_sql = "SELECT COUNT(*) as count 
               FROM transactions t 
               LEFT JOIN parties p ON t.party_id = p.id
-              WHERE t.transaction_type = 'Payment' 
+              WHERE (t.transaction_type = 'Payment' OR t.transaction_type = 'Received')
               AND t.payment_type = 'Payment_In'
               AND t.company_id = $company_id
               $where_clause";
@@ -621,17 +721,8 @@ if ($total_result && $transactions) {
 }
 ?>
 
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Payment Receipt Management</title>
-    
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800;900&family=Open+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/sweetalert2@11.0.18/dist/sweetalert2.min.css">
-    <style>
+<!-- Page-specific styles (page body comes from components/layout.php) -->
+<style>
         :root {
             --primary: #FFD700;
             --primary-dark: #DAA520;
@@ -716,13 +807,6 @@ if ($total_result && $transactions) {
         }
 
         /* Soft gradient backgrounds */
-        .soft-gradient-blue { background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(59, 130, 246, 0.05)); }
-        .soft-gradient-green { background: linear-gradient(135deg, rgba(34, 197, 94, 0.1), rgba(34, 197, 94, 0.05)); }
-        .soft-gradient-orange { background: linear-gradient(135deg, rgba(249, 115, 22, 0.1), rgba(249, 115, 22, 0.05)); }
-        .soft-gradient-purple { background: linear-gradient(135deg, rgba(168, 85, 247, 0.1), rgba(168, 85, 247, 0.05)); }
-        .soft-gradient-teal { background: linear-gradient(135deg, rgba(20, 184, 166, 0.1), rgba(20, 184, 166, 0.05)); }
-        .soft-gradient-red { background: linear-gradient(135deg, rgba(239, 68, 68, 0.1), rgba(239, 68, 68, 0.05)); }
-
         .text-primary { color: #0284c7; }
         .text-warning { color: #d97706; }
         .text-success { color: #16a34a; }
@@ -849,196 +933,204 @@ if ($total_result && $transactions) {
     html {
         scroll-behavior: smooth;
     }
+        .stats-card-label {
+            font-size: 10px;
+            font-weight: 500;
+            letter-spacing: 0.02em;
+            color: rgb(100 116 139);
+        }
+        .stats-card-value {
+            font-size: 1rem;
+            font-weight: 600;
+            color: rgb(51 65 85);
+            font-variant-numeric: tabular-nums;
+        }
+        .stats-icon-wrap {
+            width: 2rem;
+            height: 2rem;
+            border-radius: 0.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .soft-gradient-green { background: linear-gradient(135deg, rgba(34, 197, 94, 0.1), rgba(34, 197, 94, 0.05)); }
+        .soft-gradient-blue { background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(59, 130, 246, 0.05)); }
+        .soft-gradient-purple { background: linear-gradient(135deg, rgba(168, 85, 247, 0.1), rgba(168, 85, 247, 0.05)); }
+        .soft-gradient-teal { background: linear-gradient(135deg, rgba(20, 184, 166, 0.1), rgba(20, 184, 166, 0.05)); }
+        .soft-gradient-orange { background: linear-gradient(135deg, rgba(249, 115, 22, 0.1), rgba(249, 115, 22, 0.05)); }
+        .soft-gradient-rose { background: linear-gradient(135deg, rgba(244, 63, 94, 0.09), rgba(244, 63, 94, 0.03)); }
+        .compact-input { padding-top: 0.375rem !important; padding-bottom: 0.375rem !important; font-size: 0.75rem !important; }
     </style>
-</head>
-<body>
-    <!-- Main Content Container -->
-    <div class="w-full">
-        <!-- Colorful Statistics with Icons -->
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-4 mb-6">
-            <!-- Cash Received -->
-            <div class="soft-gradient-green rounded-xl p-4 shadow-sm h-full">
+
+<div class="w-full px-1 pb-4">
+        <!-- Statistics (compact cards — same family as purchase/sell) -->
+        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2 mb-3">
+            <div class="soft-gradient-green rounded-xl p-2 shadow-sm border border-slate-200/50">
                 <div class="flex items-center justify-between">
                     <div>
-                        <p class="text-xs font-medium text-green-700 mb-1">Cash Received</p>
-                        <p class="text-lg font-bold text-green-800 mb-0">₹<?= number_format($stats['total_cash_received'] ?? 0, 0) ?></p>
-                        <p class="text-xs text-green-600 mb-0">Cash Payments</p>
+                        <p class="text-[9px] font-bold text-emerald-800 uppercase tracking-tighter opacity-80 leading-none mb-0.5">Cash in hand</p>
+                        <p class="text-[13px] font-bold text-emerald-900 leading-none">₹<?= number_format($stats['cash_in_hand'] ?? 0, 0) ?></p>
+                        <p class="text-[9px] text-emerald-700/80">Company</p>
                     </div>
-                    <div class="w-10 h-10 bg-green-500 rounded-lg flex items-center justify-center">
-                        <i class="fas fa-money-bill-wave text-white text-sm"></i>
+                    <div class="w-6 h-6 bg-emerald-500 rounded flex items-center justify-center">
+                        <i class="fas fa-wallet text-white text-[9px]"></i>
                     </div>
                 </div>
             </div>
-            
-            <!-- Bank Received -->
-            <div class="soft-gradient-blue rounded-xl p-4 shadow-sm h-full">
+            <div class="soft-gradient-blue rounded-xl p-2 shadow-sm border border-slate-200/50">
                 <div class="flex items-center justify-between">
                     <div>
-                        <p class="text-xs font-medium text-blue-700 mb-1">Bank Received</p>
-                        <p class="text-lg font-bold text-blue-800 mb-0">₹<?= number_format($stats['total_bank_received'] ?? 0, 0) ?></p>
-                        <p class="text-xs text-blue-600 mb-0">Bank/UPI/Cheque</p>
+                        <p class="text-[9px] font-bold text-blue-800 uppercase tracking-tighter opacity-80 leading-none mb-0.5">Bank balance</p>
+                        <p class="text-[13px] font-bold text-blue-900 leading-none">₹<?= number_format($stats['bank_balance'] ?? 0, 0) ?></p>
+                        <p class="text-[9px] text-blue-700/80">Company</p>
                     </div>
-                    <div class="w-10 h-10 bg-blue-500 rounded-lg flex items-center justify-center">
-                        <i class="fas fa-university text-white text-sm"></i>
+                    <div class="w-6 h-6 bg-blue-500 rounded flex items-center justify-center">
+                        <i class="fas fa-university text-white text-[9px]"></i>
                     </div>
                 </div>
             </div>
-            
-            <!-- Total Received -->
-            <div class="soft-gradient-purple rounded-xl p-4 shadow-sm h-full">
+            <div class="soft-gradient-purple rounded-xl p-2 shadow-sm border border-slate-200/50">
                 <div class="flex items-center justify-between">
                     <div>
-                        <p class="text-xs font-medium text-purple-700 mb-1">Total Received</p>
-                        <p class="text-lg font-bold text-purple-800 mb-0">₹<?= number_format($stats['total_payments_received'] ?? 0, 0) ?></p>
-                        <p class="text-xs text-purple-600 mb-0">All Payments</p>
+                        <p class="text-[9px] font-bold text-purple-800 uppercase tracking-tighter opacity-80 leading-none mb-0.5">Cash received</p>
+                        <p class="text-[13px] font-bold text-purple-900 leading-none">₹<?= number_format($stats['total_cash_received'] ?? 0, 0) ?></p>
+                        <p class="text-[9px] text-purple-700/80">Today</p>
                     </div>
-                    <div class="w-10 h-10 bg-purple-500 rounded-lg flex items-center justify-center">
-                        <i class="fas fa-coins text-white text-sm"></i>
+                    <div class="w-6 h-6 bg-purple-500 rounded flex items-center justify-center">
+                        <i class="fas fa-money-bill-wave text-white text-[9px]"></i>
                     </div>
                 </div>
             </div>
-            
-            <!-- Payment Transactions -->
-            <div class="soft-gradient-teal rounded-xl p-4 shadow-sm h-full">
+            <div class="soft-gradient-teal rounded-xl p-2 shadow-sm border border-slate-200/50">
                 <div class="flex items-center justify-between">
                     <div>
-                        <p class="text-xs font-medium text-teal-700 mb-1">Transactions</p>
-                        <p class="text-lg font-bold text-teal-800 mb-0"><?= number_format($stats['total_payment_transactions'] ?? 0, 0) ?></p>
-                        <p class="text-xs text-teal-600 mb-0">Payment Count</p>
+                        <p class="text-[9px] font-bold text-teal-800 uppercase tracking-tighter opacity-80 leading-none mb-0.5">Bank received</p>
+                        <p class="text-[13px] font-bold text-teal-900 leading-none">₹<?= number_format($stats['total_bank_received'] ?? 0, 0) ?></p>
+                        <p class="text-[9px] text-teal-700/80">Today</p>
                     </div>
-                    <div class="w-10 h-10 bg-teal-500 rounded-lg flex items-center justify-center">
-                        <i class="fas fa-receipt text-white text-sm"></i>
+                    <div class="w-6 h-6 bg-teal-500 rounded flex items-center justify-center">
+                        <i class="fas fa-building-columns text-white text-[9px]"></i>
                     </div>
                 </div>
             </div>
-            
-            <!-- Outstanding Amount -->
-            <div class="soft-gradient-orange rounded-xl p-4 shadow-sm h-full">
+            <div class="soft-gradient-orange rounded-xl p-2 shadow-sm border border-slate-200/50">
                 <div class="flex items-center justify-between">
                     <div>
-                        <p class="text-xs font-medium text-orange-700 mb-1">Outstanding</p>
-                        <p class="text-lg font-bold text-orange-800 mb-0">₹<?= number_format($stats['total_outstanding'] ?? 0, 0) ?></p>
-                        <p class="text-xs text-orange-600 mb-0">Due Amount</p>
+                        <p class="text-[9px] font-bold text-orange-800 uppercase tracking-tighter opacity-80 leading-none mb-0.5">Total outstanding</p>
+                        <p class="text-[13px] font-bold text-orange-900 leading-none">₹<?= number_format($stats['total_outstanding'] ?? 0, 0) ?></p>
+                        <p class="text-[9px] text-orange-700/80">Parties</p>
                     </div>
-                    <div class="w-10 h-10 bg-orange-500 rounded-lg flex items-center justify-center">
-                        <i class="fas fa-exclamation-triangle text-white text-sm"></i>
-                    </div>
-                </div>
-            </div>
-            
-            <!-- Collection Rate -->
-            <div class="soft-gradient-red rounded-xl p-4 shadow-sm h-full">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-xs font-medium text-red-700 mb-1">Collection Rate</p>
-                        <p class="text-lg font-bold text-red-800 mb-0"><?= $stats['total_booked_amount'] > 0 ? number_format((($stats['total_received_amount'] ?? 0) / $stats['total_booked_amount']) * 100, 1) : 0 ?>%</p>
-                        <p class="text-xs text-red-600 mb-0">Collection %</p>
-                    </div>
-                    <div class="w-10 h-10 bg-red-500 rounded-lg flex items-center justify-center">
-                        <i class="fas fa-percentage text-white text-sm"></i>
+                    <div class="w-6 h-6 bg-orange-500 rounded flex items-center justify-center">
+                        <i class="fas fa-file-invoice-dollar text-white text-[9px]"></i>
                     </div>
                 </div>
             </div>
         </div>
 
         <!-- Main Form and List Layout -->
-        <div class="flex flex-col lg:flex-row gap-6">
-            <!-- Left Side - Payment Receipt Form -->
-            <div class="bg-white rounded-lg shadow-md border border-gray-200" style="flex: 0 0 55%;">
-                <div class="bg-gradient-to-r from-green-500 to-green-600 px-4 py-2 rounded-t-lg">
-                    <h2 class="text-base font-semibold text-white flex items-center">
-                        <i class="fas fa-money-bill-wave mr-2"></i>
-                        Payment Receipt
-                    </h2>
-                </div>
-                <div class="p-3">
-                    <form id="paymentForm" method="POST" class="space-y-3">
+        <div class="flex flex-col lg:flex-row gap-3">
+            <!-- Left — form (grid matches purchase / sell) -->
+            <div class="bg-white rounded-lg shadow-md border border-gray-200 overflow-hidden" style="flex: 0 0 55%;">
+                <form id="paymentForm" method="POST" class="overflow-hidden" onsubmit="return false;">
                         <input type="hidden" name="action" value="save_payment">
                         <input type="hidden" name="party_id" id="partyId">
-                        
-                        <!-- Row 1: Receipt ID & Date -->
-                        <div class="grid grid-cols-2 gap-3">
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-1">Receipt ID <span id="editModeIndicator" class="text-xs text-orange-600 font-semibold hidden">(Editing)</span></label>
+                        <input type="hidden" id="editTransactionId" value="">
+
+                        <div class="bg-emerald-50 px-3 py-1 border-b border-emerald-100">
+                            <h3 class="text-xs font-bold text-emerald-900 flex items-center">
+                                <i class="fas fa-file-invoice mr-1.5 text-xs"></i> Transaction details
+                            </h3>
+                        </div>
+                        <div class="p-2 grid grid-cols-12 gap-1.5">
+                            <div class="relative col-span-3">
+                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter">Receipt ID <span id="editModeIndicator" class="text-orange-600 hidden">(Edit)</span></label>
                                 <div class="relative">
-                                    <input type="text" class="block w-full px-3 py-2 pr-10 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500 cursor-pointer" name="receipt_id" readonly id="receiptIdInput" tabindex="0">
-                                    <button type="button" class="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600" id="showReceiptListBtn" title="Show previous receipts">
-                                        <i class="fas fa-history"></i>
-                                    </button>
+                                    <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-gray-500"><i class="fas fa-hashtag text-xs"></i></span>
+                                    <input type="text" name="receipt_id" readonly id="receiptIdInput" tabindex="0"
+                                        class="block w-full pl-7 pr-8 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-emerald-400 cursor-pointer">
+                                    <button type="button" class="absolute right-1 top-1/2 -translate-y-1/2 text-gray-400 hover:text-emerald-600" id="showReceiptListBtn" title="History"><i class="fas fa-history text-xs"></i></button>
                                 </div>
-                                <div id="receiptList" class="absolute z-10 mt-1 bg-white border border-gray-200 rounded-lg shadow-xl max-h-64 overflow-y-auto hidden" style="width: 400px; max-width: 90vw;"></div>
+                                <div id="receiptList" class="hidden absolute z-[60] mt-1 bg-white border border-gray-200 rounded-lg shadow-xl max-h-56 overflow-y-auto w-[min(100%,34rem)]"></div>
                             </div>
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-1">Date</label>
-                                <input type="datetime-local" class="block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500" name="date_of_transaction" required>
+                            <div class="relative col-span-3">
+                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter">Date</label>
+                                <span class="absolute inset-y-0 left-0 top-5 pl-2 flex items-center pointer-events-none text-emerald-600"><i class="fas fa-calendar-alt text-xs"></i></span>
+                                <input type="datetime-local" name="date_of_transaction" required
+                                    class="block w-full pl-7 pr-1 py-1.5 text-[11px] font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-emerald-400">
+                            </div>
+                            <div class="relative col-span-6">
+                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 flex items-center justify-between uppercase tracking-tighter">
+                                    <span>Party name</span>
+                                    <button type="button" id="addNewPartyBtn" class="text-blue-600 hover:text-blue-800 font-bold transition-all text-[9px] flex items-center uppercase tracking-tighter">
+                                        <i class="fas fa-plus-circle mr-1 text-[10px]"></i> Add new
+                                    </button>
+                                </label>
+                                <div class="relative">
+                                    <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-blue-500"><i class="fas fa-user text-xs"></i></span>
+                                    <input type="text" name="party_name" id="partyNameInput" required autocomplete="off" placeholder="Select party"
+                                        class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-blue-400 compact-input">
+                                </div>
+                                <div id="partyList" class="hidden absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-72 overflow-y-auto"></div>
                             </div>
                         </div>
 
-                        <!-- Row 2: Party Name -->
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Customer Name</label>
-                            <div class="relative">
-                                <input type="text" class="block w-full pl-3 pr-20 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500" name="party_name" id="partyNameInput" required autocomplete="off" placeholder="Enter customer name...">
-                                <div class="absolute inset-y-0 right-0 flex items-center pr-2">
-                                    <button type="button" class="px-3 py-1 text-sm bg-green-500 text-white rounded-lg hover:bg-green-600" id="addNewPartyBtn">
-                                        <i class="fas fa-plus mr-1"></i>New
-                                    </button>
-                                </div>
-                                <div id="partyList" class="absolute top-full left-0 right-0 bg-white border border-gray-200 rounded-lg shadow-xl max-h-64 overflow-y-auto z-50 hidden" style="width: calc(100% - 0px);"></div>
-                            </div>
+                        <div id="balanceInfoSection" class="hidden px-2 pb-2">
+                            <div class="bg-blue-50 border border-blue-200 rounded-lg p-2 text-xs" id="balanceAlert"></div>
                         </div>
 
-                        <!-- Customer Balance Info -->
-                        <div id="balanceInfoSection" class="hidden">
-                            <div class="bg-blue-50 border border-blue-200 rounded-lg p-3" id="balanceAlert">
-                                <!-- Will be populated by JavaScript -->
-                            </div>
+                        <div class="bg-indigo-50 px-3 py-1 border-t border-b border-indigo-100">
+                            <h3 class="text-xs font-bold text-indigo-800 flex items-center">
+                                <i class="fas fa-money-bill-wave mr-1.5 text-xs"></i> Payment details
+                            </h3>
                         </div>
-                        
-                        <!-- Row 3: Payment Amount & Method -->
-                        <div class="grid grid-cols-2 gap-3">
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-1">Payment Amount (₹)</label>
-                                <input type="number" step="0.01" class="block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500" name="payment_amount" id="paymentAmount" required placeholder="0.00">
+                        <div class="p-2 grid grid-cols-12 gap-1.5">
+                            <div class="col-span-4 relative">
+                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter">Amount (₹)</label>
+                                <span class="absolute inset-y-0 left-0 top-5 pl-2 flex items-center pointer-events-none text-indigo-500"><i class="fas fa-wallet text-xs"></i></span>
+                                <input type="number" step="0.01" name="payment_amount" id="paymentAmount" required placeholder="0.00"
+                                    class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-indigo-400 compact-input">
                             </div>
-                            <div>
-                                <label class="block text-sm font-medium text-gray-700 mb-1">Payment Method</label>
-                                <select class="block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500" name="payment_method" required>
-                                    <option value="">Select Method</option>
-                                    <option value="Cash">💵 Cash</option>
-                                    <option value="Bank">🏦 Bank</option>
+                            <div class="col-span-4 relative">
+                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter">Method</label>
+                                <span class="absolute inset-y-0 left-0 top-5 pl-2 flex items-center pointer-events-none text-gray-500"><i class="fas fa-credit-card text-xs"></i></span>
+                                <select name="payment_method" required
+                                    class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-gray-400 compact-input">
+                                    <option value="">Select</option>
+                                    <option value="Cash">Cash</option>
+                                    <option value="Bank">Bank</option>
                                 </select>
                             </div>
-                        </div>
-                        
-                        <!-- Row 4: Narration -->
-                        <div>
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Narration (Optional)</label>
-                            <textarea class="block w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500" name="narration" rows="2" placeholder="Enter any additional notes..."></textarea>
+                            <div class="col-span-4 relative">
+                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter">Narration</label>
+                                <span class="absolute inset-y-0 left-0 top-5 pl-2 flex items-center pointer-events-none text-gray-400"><i class="fas fa-comment-alt text-xs"></i></span>
+                                <input type="text" name="narration" placeholder="Optional notes…"
+                                    class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold border border-gray-200 rounded focus:ring-1 focus:ring-gray-400 compact-input">
+                            </div>
                         </div>
 
-                        <!-- Row 6: Submit and Reset Buttons -->
-                        <div class="grid grid-cols-2 gap-3">
-                            <button type="submit" id="savePaymentBtn" class="px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 focus:ring-2 focus:ring-green-500 focus:ring-offset-2 flex items-center justify-center">
-                                <i class="fas fa-money-bill-wave mr-2"></i>Record Payment
-                            </button>
-                            <button type="button" id="resetFormBtn" class="px-4 py-2 bg-gray-500 text-white text-sm font-medium rounded-lg hover:bg-gray-600 focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 flex items-center justify-center">
-                                <i class="fas fa-undo mr-2"></i>Reset
+                        <div class="bg-gray-50 px-3 py-2 border-t border-gray-200 flex items-center gap-2 justify-end flex-wrap">
+                            <button type="button" id="resetFormBtn"
+                                class="px-3 py-1.5 bg-white border border-gray-300 text-gray-700 text-xs font-bold rounded hover:bg-gray-50 shadow-sm"
+                                title="Reset"><i class="fas fa-undo"></i></button>
+                            <button type="button" id="deleteEditedPaymentBtn"
+                                class="hidden px-3 py-1.5 bg-white border border-red-300 text-red-700 text-xs font-bold rounded hover:bg-red-50 shadow-sm"
+                                title="Delete this payment"><i class="fas fa-trash mr-1"></i>Delete</button>
+                            <button type="submit" id="savePaymentBtn"
+                                class="px-5 py-1.5 bg-emerald-600 text-white text-xs font-bold rounded hover:bg-emerald-700 shadow-sm">
+                                <i class="fas fa-save mr-1"></i>Record payment
                             </button>
                         </div>
                     </form>
-                </div>
             </div>
 
-            <!-- Right Side - Recent Payments List -->
-            <div class="bg-white rounded-lg shadow-md border border-gray-200" style="flex: 0 0 45%;">
-                <div class="bg-gradient-to-r from-green-500 to-green-600 px-4 py-2 rounded-t-lg">
-                    <h2 class="text-base font-semibold text-white flex items-center">
-                        <i class="fas fa-list mr-2"></i>
-                        Recent Payments
+            <!-- Right — list -->
+            <div class="bg-white rounded-lg shadow-md border border-gray-200 overflow-hidden" style="flex: 0 0 45%;">
+                <div class="bg-blue-50 px-3 py-1.5 border-b border-blue-100 rounded-t-lg">
+                    <h2 class="text-xs font-bold text-blue-800 flex items-center">
+                        <i class="fas fa-list mr-1.5 text-xs"></i> Recent payments
                     </h2>
                 </div>
-                <div class="p-3 max-w-full">
+                <div class="p-2 max-w-full">
                     <div class="overflow-x-auto max-w-full">
                         <table class="w-full text-sm responsive-table" style="table-layout: fixed; width: 100%; max-width: 100%;">
                             <thead>
@@ -1051,30 +1143,31 @@ if ($total_result && $transactions) {
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php if ($transactions && $transactions->num_rows > 0): 
-                                foreach ($transactions as $t): ?>
+                                <?php if ($transactions && $transactions->num_rows > 0):
+                                foreach ($transactions as $t):
+                                $pay_disp = payment_receipt_list_display_id($t);
+                                $partyLines = payment_receipt_party_display_lines($t);
+                                ?>
                                     <tr class="border-b hover:bg-gray-50">
                                         <td class="py-2 px-1">
                                             <div class="flex items-center">
-                                                <span class="bg-green-500 text-white text-xs px-1.5 py-0.5 rounded-full mr-1 font-bold">PAY</span>
+                                                <span class="bg-blue-600 text-white text-xs px-1.5 py-0.5 rounded-full mr-1 font-bold">PAY</span>
                                                 <div>
-                                                    <div class="font-mono text-sm font-bold text-gray-900"><?= htmlspecialchars($t['receipt_id']) ?></div>
+                                                    <div class="font-mono text-sm font-bold text-gray-900" title="<?= htmlspecialchars($t['receipt_id']) ?>"><?= htmlspecialchars($pay_disp) ?></div>
                                                     <div class="text-xs text-gray-500 border-b border-gray-300 pb-0.5"><?= date('d M Y', strtotime($t['date_of_transaction'])) ?></div>
                                                 </div>
                                             </div>
                                         </td>
                                         <td class="py-2 px-1">
-                                            <div class="font-semibold text-gray-900 text-sm"><?= htmlspecialchars($t['party_name']) ?></div>
-                                            <?php if ($t['party_contact']): ?>
-                                                <div class="text-xs text-gray-500"><?= htmlspecialchars($t['party_contact']) ?></div>
-                                            <?php endif; ?>
+                                            <div class="font-semibold text-gray-900 text-sm leading-tight"><?= htmlspecialchars($partyLines['name']) ?></div>
+                                            <div class="text-[11px] text-gray-500"><?= htmlspecialchars($partyLines['sub']) ?></div>
                                         </td>
                                         <td class="py-2 px-1">
-                                            <div class="text-sm font-bold text-green-600">₹<?= number_format($t['payment_amount'], 2) ?></div>
+                                            <div class="text-sm font-bold text-blue-700">₹<?= number_format($t['payment_amount'], 2) ?></div>
                                             <div class="text-xs text-gray-500"><?= htmlspecialchars($t['payment_method']) ?></div>
                                         </td>
                                         <td class="py-2 px-1">
-                                            <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                                            <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-50 text-blue-800">
                                                 <?= htmlspecialchars($t['payment_type']) ?>
                                             </span>
                                         </td>
@@ -1086,7 +1179,7 @@ if ($total_result && $transactions) {
                                                 <button type="button" class="print-payment-btn text-blue-600 hover:text-blue-800" title="Print" data-id="<?= $t['id'] ?>">
                                                     <i class="fas fa-print text-xs"></i>
                                                 </button>
-                                                <button type="button" class="delete-payment-btn text-red-600 hover:text-red-800" title="Delete" data-id="<?= $t['id'] ?>" data-receipt-id="<?= htmlspecialchars($t['receipt_id']) ?>" data-amount="<?= $t['payment_amount'] ?>">
+                                                <button type="button" class="delete-payment-btn text-red-600 hover:text-red-800" title="Delete" data-id="<?= $t['id'] ?>" data-receipt-id="<?= htmlspecialchars($t['receipt_id']) ?>" data-display-id="<?= htmlspecialchars($pay_disp) ?>" data-amount="<?= $t['payment_amount'] ?>">
                                                     <i class="fas fa-trash text-xs"></i>
                                                 </button>
                                             </div>
@@ -1111,7 +1204,7 @@ if ($total_result && $transactions) {
                         <nav class="flex space-x-1">
                             <?php for ($i = 1; $i <= $total_pages; $i++): ?>
                                 <a href="?page=<?= $i ?><?= isset($_GET['search']) ? '&search=' . htmlspecialchars($_GET['search']) : '' ?>" 
-                                   class="px-3 py-2 text-sm border border-gray-300 rounded-lg <?= $i == $page ? 'bg-green-500 text-white' : 'text-gray-700 hover:bg-gray-50' ?>">
+                                   class="px-3 py-2 text-sm border border-gray-300 rounded-lg <?= $i == $page ? 'bg-blue-600 text-white border-blue-600' : 'text-gray-700 hover:bg-gray-50' ?>">
                                     <?= $i ?>
                                 </a>
                             <?php endfor; ?>
@@ -1207,42 +1300,55 @@ if ($total_result && $transactions) {
             function showReceiptList() {
                 const receiptList = $('#receiptList');
                 
-                // Show loading
-                receiptList.html('<div class="p-3 text-center text-gray-500"><i class="fas fa-spinner fa-spin"></i> Loading...</div>');
+                receiptList.html(
+                    '<div class="p-1.5 text-center text-gray-500 text-[10px]"><i class="fas fa-spinner fa-spin"></i> Loading…</div>'
+                );
                 receiptList.removeClass('hidden');
                 
-                // Fetch receipt list
-                $.post('', {
-                    action: 'get_receipt_list'
-                }, function(response) {
+                $.post('', { action: 'get_receipt_list' }, function(response) {
                     if (response.status === 'success' && response.data && response.data.length > 0) {
-                        receiptList.html('');
+                        let rows = '';
                         response.data.forEach(function(receipt) {
-                            const receiptItem = $('<div>')
-                                .addClass('receipt-item p-2 border-b hover:bg-green-100 cursor-pointer')
-                                .html(`
-                                    <div class="flex justify-between items-center">
-                                        <div>
-                                            <b class="text-green-600">${receipt.receipt_id}</b>
-                                            <span class="text-xs text-gray-500 ml-2">${receipt.party_name || ''}</span>
-                                        </div>
-                                        <span class="text-xs text-gray-400">${receipt.date_of_transaction ? receipt.date_of_transaction.split(' ')[0] : ''}</span>
-                                    </div>
-                                    <div class="text-xs text-gray-600 mt-1">
-                                        ₹${parseFloat(receipt.payment_amount).toLocaleString('en-IN')} - ${receipt.payment_method}
-                                    </div>
-                                `)
-                                .on('click', function() {
-                                    loadReceiptForEdit(receipt.id);
-                                    receiptList.addClass('hidden');
-                                });
-                            receiptList.append(receiptItem);
+                            const disp = receipt.display_receipt_id || receipt.receipt_id;
+                            const d = (receipt.date_of_transaction || '').split(' ')[0];
+                            const pnm = String(receipt.party_list_name || receipt.party_name || '—').replace(/</g, '&lt;');
+                            const psub = String(receipt.party_list_sub || '').replace(/</g, '&lt;');
+                            const rawRid = String(receipt.receipt_id || '').replace(/"/g, '&quot;');
+                            const amt = parseFloat(receipt.payment_amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                            const meth = String(receipt.payment_method || '').replace(/</g, '&lt;');
+                            rows +=
+                                '<tr class="receipt-item border-b border-gray-100 hover:bg-blue-50/90 cursor-pointer align-top" data-tid="' + receipt.id + '">' +
+                                '<td class="py-0.5 px-1.5 w-[32%]">' +
+                                '<div class="flex items-start gap-0.5">' +
+                                '<span class="shrink-0 bg-blue-600 text-white text-[8px] px-0.5 py-px rounded font-bold leading-none mt-0.5">PAY</span>' +
+                                '<div class="min-w-0">' +
+                                '<div class="font-mono font-bold text-[11px] text-gray-900 leading-tight truncate max-w-[9rem]" title="' + rawRid + '">' + String(disp).replace(/</g, '&lt;') + '</div>' +
+                                '<div class="text-[9px] text-gray-500 leading-none">' + d + '</div></div></div></td>' +
+                                '<td class="py-0.5 px-1.5 text-[10px]">' +
+                                '<div class="font-semibold text-gray-900 leading-tight line-clamp-2">' + pnm + '</div>' +
+                                '<div class="text-[9px] text-gray-500 leading-tight">' + psub + '</div></td>' +
+                                '<td class="py-0.5 px-1.5 text-right whitespace-nowrap">' +
+                                '<div class="font-bold text-blue-700 text-[11px]">₹' + amt + '</div>' +
+                                '<div class="text-[9px] text-gray-500">' + meth + '</div></td>' +
+                                '</tr>';
+                        });
+                        receiptList.html(
+                            '<table class="w-full border-collapse text-[10px]">' +
+                            '<thead><tr class="bg-gray-100 text-gray-600 border-b border-gray-200">' +
+                            '<th class="text-left font-semibold px-1.5 py-0.5">Receipt</th>' +
+                            '<th class="text-left font-semibold px-1.5 py-0.5">Party</th>' +
+                            '<th class="text-right font-semibold px-1.5 py-0.5">Amt</th>' +
+                            '</tr></thead><tbody>' + rows + '</tbody></table>'
+                        );
+                        receiptList.find('tr.receipt-item').on('click', function() {
+                            loadReceiptForEdit($(this).data('tid'));
+                            receiptList.addClass('hidden');
                         });
                     } else {
-                        receiptList.html('<div class="p-3 text-center text-gray-500">No previous receipts found</div>');
+                        receiptList.html('<div class="p-2 text-center text-gray-500 text-[10px]">No previous receipts found</div>');
                     }
                 }, 'json').fail(function() {
-                    receiptList.html('<div class="p-3 text-center text-red-500">Error loading receipts</div>');
+                    receiptList.html('<div class="p-2 text-center text-red-500 text-[10px]">Error loading receipts</div>');
                 });
             }
 
@@ -1254,29 +1360,35 @@ if ($total_result && $transactions) {
                     if (response.status === 'success' && response.data) {
                         const data = response.data;
                         
-                        // Set edit mode on form
-                        $('#paymentForm').data('edit-id', data.id);
+                        $('#editTransactionId').val(String(data.id));
                         
-                        // Populate form
+                        // Populate form (keep stored receipt_id in DB; user may legacy CSH-*)
                         $('#receiptIdInput').val(data.receipt_id);
                         $('#editModeIndicator').removeClass('hidden');
                         
-                        // Format date
                         let dateValue = '';
                         if (data.date_of_transaction) {
-                            const date = new Date(data.date_of_transaction);
+                            const raw = String(data.date_of_transaction).replace(' ', 'T');
+                            const date = new Date(raw);
                             if (!isNaN(date.getTime())) {
                                 dateValue = date.toISOString().slice(0, 16);
                             } else {
-                                dateValue = data.date_of_transaction.replace(' ', 'T').substring(0, 16);
+                                dateValue = raw.substring(0, 16);
                             }
                         }
                         $('[name="date_of_transaction"]').val(dateValue);
                         
-                        // Set party
-                        $('#partyId').val(data.party_id);
-                        $('#partyNameInput').val(data.party_name);
-                        selectedPartyName = data.party_name;
+                        const pid = (data.party_id != null && String(data.party_id) !== '')
+                            ? parseInt(data.party_id, 10) : 0;
+                        if (pid > 0) {
+                            $('#partyId').val(String(pid));
+                            $('#partyNameInput').val((data.party_name || data.party_label || '').trim());
+                            selectedPartyName = (data.party_name || data.party_label || '').trim();
+                        } else {
+                            $('#partyId').val('');
+                            $('#partyNameInput').val((data.party_label || '').trim());
+                            selectedPartyName = '';
+                        }
                         
                         // Set payment details
                         $('#paymentAmount').val(data.payment_amount);
@@ -1284,10 +1396,10 @@ if ($total_result && $transactions) {
                         $('[name="narration"]').val(data.narration || '');
                         
                         // Change button to Update mode
-                        $('#savePaymentBtn').text('Update Receipt').removeClass('bg-green-600 hover:bg-green-700').addClass('bg-orange-600 hover:bg-orange-700');
+                        $('#savePaymentBtn').html('<i class="fas fa-save mr-1"></i>Update receipt').attr('class', 'px-5 py-1.5 bg-orange-600 text-white text-xs font-bold rounded hover:bg-orange-700 shadow-sm');
                         
-                        // Highlight form
                         $('#paymentForm').closest('.bg-white').css('border', '2px solid #f97316');
+                        $('#deleteEditedPaymentBtn').removeClass('hidden');
                     } else {
                         Swal.fire({
                             icon: 'error',
@@ -1313,112 +1425,142 @@ if ($total_result && $transactions) {
             
             // Payment method handler removed - no gold payments in payment receipt
 
-            // Party search functionality
+            // Party search — dropdown layout matches gold exchange (wallet + cash/bank + gold)
             let partyListVisible = false;
             let currentIndex = -1;
             let selectedPartyName = '';
-            
+
+            function escPartyHtml(t) {
+                return String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+            }
+
+            function appendCreatePartyRow(partyListEl, searchTerm) {
+                const row = document.createElement('div');
+                row.className = 'px-3 py-2 hover:bg-green-50 cursor-pointer transition-colors party-item bg-green-50 border-t-2 border-green-200';
+                row.setAttribute('data-create-new', '1');
+                row.innerHTML = `
+                    <div class="flex items-center gap-2">
+                        <i class="fas fa-plus-circle text-green-600"></i>
+                        <div class="font-semibold text-[11px] text-green-700">Create new party &quot;${escPartyHtml(searchTerm)}&quot;</div>
+                    </div>`;
+                row.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    if (typeof SharedPartyHandler !== 'undefined') {
+                        SharedPartyHandler.showAddPartyModal({
+                            prefillName: searchTerm,
+                            onSuccess: function (response, partyData) {
+                                const pid = response.party_id || response.id;
+                                $('#partyId').val(pid || '');
+                                $('#partyNameInput').val(partyData.party_name || '');
+                                selectedPartyName = partyData.party_name || '';
+                                $('#partyList').addClass('hidden');
+                                partyListVisible = false;
+                                if (pid) {
+                                    selectParty({ id: pid, party_name: partyData.party_name || '' });
+                                }
+                            }
+                        });
+                    }
+                });
+                partyListEl.append(row);
+            }
+
             $('#partyNameInput').on('input', function () {
                 const term = $(this).val();
-                
-                // Reset selection if user clears or modifies the selected party name
+
                 if (term !== selectedPartyName) {
                     selectedPartyName = '';
                     $('#partyId').val('');
                 }
-                
-                if (term.length >= 1) {
-                    $.post('', {
-                        action: 'search_parties',
-                        term: term
-                    }, function (parties) {
-                        console.log('Parties response:', parties); // Debug log
-                        
-                        const partyList = $('#partyList');
-                        partyList.empty();
-                        currentIndex = -1;
-                        parties.forEach((party, index) => {
-                            console.log('Processing party:', party); // Debug log
-                            
-                            const hasBooking = parseFloat(party.booked_amount || 0) > 0;
-                            // Handle remaining_amount - it could be a number or formatted string
-                            let remainingAmount = 0;
-                            if (typeof party.remaining_amount === 'number') {
-                                remainingAmount = party.remaining_amount;
-                            } else {
-                                // Remove commas and parse
-                                remainingAmount = parseFloat((party.remaining_amount || '0').toString().replace(/,/g, ''));
-                            }
-                            const safeRemainingAmount = isNaN(remainingAmount) ? 0 : remainingAmount;
-                            
-                            const statusBadge = hasBooking 
-                                ? `<div class="flex items-center space-x-1">
-                                    <span class="bg-blue-500 text-white text-xs px-1.5 py-0.5 rounded-full font-bold">B</span>
-                                    <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${safeRemainingAmount > 0 ? 'bg-orange-100 text-orange-800' : 'bg-green-100 text-green-800'}">₹${safeRemainingAmount.toLocaleString('en-IN')}</span>
-                                   </div>` 
-                                : `<span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-800">No Booking</span>`;
-                            
-                            const partyItem = document.createElement('div');
-                            partyItem.className = 'px-2 py-1.5 hover:bg-green-50 cursor-pointer border-b border-gray-100 last:border-b-0 transition-colors duration-150 party-item';
-                            partyItem.setAttribute('data-index', index);
-                            partyItem.setAttribute('data-id', party.id || '');
-                            partyItem.setAttribute('data-name', party.party_name || '');
-                            partyItem.setAttribute('data-address', party.address || '');
-                            partyItem.setAttribute('data-booked', party.booked_amount || '0');
-                            partyItem.setAttribute('data-received', party.total_received || '0');
-                            partyItem.setAttribute('data-remaining', party.remaining_amount || '0');
-                            
-                            partyItem.innerHTML = `
-                                <div class="flex items-center">
-                                    <div class="w-6 h-6 bg-gradient-to-br from-green-500 to-green-600 rounded-full flex items-center justify-center text-white text-xs font-semibold mr-2 shadow-sm">
-                                        ${(party.party_name || 'U').charAt(0).toUpperCase()}
-                                    </div>
-                                    <div class="flex-1 min-w-0">
-                                        <div class="text-sm font-medium text-gray-900 truncate">${party.party_name || 'Unknown Party'}</div>
-                                        <div class="text-xs text-gray-500 truncate">${party.address || 'No address provided'}</div>
-                                    </div>
-                                    <div class="flex items-center space-x-1 ml-2">
-                                        <div class="text-right">
-                                            ${statusBadge}
-                                        </div>
-                                        <div class="text-xs text-gray-400">
-                                            <i class="fas fa-chevron-right"></i>
-                                        </div>
-                                    </div>
-                                </div>
-                            `;
-                            
-                            // Add click handler
-                            partyItem.addEventListener('click', (e) => {
-                                e.stopPropagation();
-                                const partyData = {
-                                    id: partyItem.getAttribute('data-id'),
-                                    party_name: partyItem.getAttribute('data-name'),
-                                    address: partyItem.getAttribute('data-address'),
-                                    booked_amount: partyItem.getAttribute('data-booked'),
-                                    total_received: partyItem.getAttribute('data-received'),
-                                    remaining_amount: partyItem.getAttribute('data-remaining')
-                                };
-                                selectParty(partyData);
-                            });
-                            
-                            partyList[0].appendChild(partyItem);
-                        });
-                        if (parties.length > 0) {
-                            partyList.removeClass('hidden');
-                            partyListVisible = true;
-                            currentIndex = -1;
-                        } else {
-                            partyList.addClass('hidden');
-                            partyListVisible = false;
-                        }
-                    }, 'json');
-                } else {
+
+                if (term.length < 1) {
                     $('#partyList').addClass('hidden');
                     partyListVisible = false;
                     selectedPartyName = '';
                     $('#partyId').val('');
                     $('#balanceInfoSection').addClass('hidden');
+                    return;
+                }
+
+                $.post('', { action: 'search_parties', term: term }, function (parties) {
+                    const partyList = $('#partyList');
+                    partyList.empty();
+                    currentIndex = -1;
+
+                    if (!parties || parties.length === 0) {
+                        appendCreatePartyRow(partyList, term.trim());
+                        partyList.removeClass('hidden');
+                        partyListVisible = true;
+                        return;
+                    }
+
+                    parties.forEach((party, index) => {
+                        const cb = parseFloat(party.cash_balance) || 0;
+                        const bb = parseFloat(party.bank_balance) || 0;
+                        const totalRaw = parseFloat(party.total_due_amount);
+                        const ledger = !isNaN(totalRaw) ? totalRaw : (cb + bb);
+                        const gb = parseFloat(party.gold_balance != null ? party.gold_balance : party.total_due_gold) || 0;
+                        const sb = parseFloat(party.silver_balance != null ? party.silver_balance : party.total_due_silver) || 0;
+                        const pname = escPartyHtml(party.party_name || '');
+                        const addr = escPartyHtml((party.address || '').trim() || 'No address');
+
+                        const partyItem = document.createElement('div');
+                        partyItem.className = 'px-3 py-2 hover:bg-yellow-50 cursor-pointer border-b border-gray-100 last:border-b-0 transition-colors party-item';
+                        partyItem.setAttribute('data-index', String(index));
+                        partyItem.setAttribute('data-id', party.id || '');
+                        partyItem.setAttribute('data-name', party.party_name || '');
+                        partyItem.setAttribute('data-address', party.address || '');
+
+                        const silverLine = Math.abs(sb) >= 0.0001
+                            ? `<div class="text-[10px] text-slate-500 font-bold tracking-tight"><i class="fas fa-compact-disc mr-1 opacity-70"></i>${sb.toFixed(3)}g Ag</div>`
+                            : '';
+
+                        partyItem.innerHTML = `
+                            <div class="flex justify-between items-start gap-2">
+                                <div class="font-bold text-[11px] text-slate-800 uppercase tracking-tight leading-tight">${pname}</div>
+                                <div class="text-[10px] text-slate-400 font-medium truncate max-w-[130px] text-right">${addr}</div>
+                            </div>
+                            <div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1">
+                                <div class="text-[10px] text-rose-600 font-bold tracking-tight"><i class="fas fa-wallet mr-1 opacity-70"></i>₹${ledger.toLocaleString('en-IN')}</div>
+                                <div class="text-[9px] text-slate-500 font-semibold">C ₹${cb.toLocaleString('en-IN')} · B ₹${bb.toLocaleString('en-IN')}</div>
+                                <div class="text-[10px] text-amber-600 font-bold tracking-tight"><i class="fas fa-coins mr-1 opacity-70"></i>${gb.toFixed(3)}g</div>
+                                ${silverLine}
+                            </div>`;
+
+                        partyItem.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            selectParty({
+                                id: partyItem.getAttribute('data-id'),
+                                party_name: partyItem.getAttribute('data-name'),
+                                address: partyItem.getAttribute('data-address')
+                            });
+                        });
+                        partyList.append(partyItem);
+                    });
+
+                    appendCreatePartyRow(partyList, term.trim());
+                    partyList.removeClass('hidden');
+                    partyListVisible = true;
+                }, 'json');
+            });
+
+            $('#addNewPartyBtn').on('click', function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                const t = ($('#partyNameInput').val() || '').trim();
+                if (typeof SharedPartyHandler !== 'undefined') {
+                    SharedPartyHandler.showAddPartyModal({
+                        prefillName: t,
+                        onSuccess: function (response, partyData) {
+                            const pid = response.party_id || response.id;
+                            $('#partyId').val(pid || '');
+                            $('#partyNameInput').val(partyData.party_name || '');
+                            selectedPartyName = partyData.party_name || '';
+                            if (pid) {
+                                selectParty({ id: pid, party_name: partyData.party_name || '' });
+                            }
+                        }
+                    });
                 }
             });
             
@@ -1453,13 +1595,14 @@ if ($total_result && $transactions) {
                         e.stopPropagation();
                         const selectedItem = partyItems[currentIndex];
                         if (selectedItem) {
+                            if (selectedItem.getAttribute('data-create-new')) {
+                                selectedItem.click();
+                                return;
+                            }
                             const partyData = {
                                 id: selectedItem.getAttribute('data-id'),
                                 party_name: selectedItem.getAttribute('data-name'),
-                                address: selectedItem.getAttribute('data-address'),
-                                booked_amount: selectedItem.getAttribute('data-booked'),
-                                total_received: selectedItem.getAttribute('data-received'),
-                                remaining_amount: selectedItem.getAttribute('data-remaining')
+                                address: selectedItem.getAttribute('data-address')
                             };
                             selectParty(partyData);
                             // Move to next field after selection
@@ -1490,11 +1633,15 @@ if ($total_result && $transactions) {
                 
                 partyItems.forEach((item, index) => {
                     if (index === currentIndex && currentIndex >= 0) {
-                        item.classList.add('bg-green-100', 'border-l-4', 'border-green-500');
-                        item.classList.remove('hover:bg-green-50');
+                        item.classList.add('bg-yellow-100', 'border-l-4', 'border-amber-400');
+                        item.classList.remove('hover:bg-yellow-50', 'hover:bg-green-50', 'bg-green-50');
                     } else {
-                        item.classList.remove('bg-green-100', 'border-l-4', 'border-green-500');
-                        item.classList.add('hover:bg-green-50');
+                        item.classList.remove('bg-yellow-100', 'border-l-4', 'border-amber-400');
+                        if (item.getAttribute('data-create-new')) {
+                            item.classList.add('hover:bg-green-50');
+                        } else {
+                            item.classList.add('hover:bg-yellow-50');
+                        }
                     }
                 });
                 
@@ -1591,10 +1738,10 @@ if ($total_result && $transactions) {
             $('#paymentForm').on('submit', function(e) {
                 e.preventDefault();
                 
-                const editId = $(this).data('edit-id');
+                const editId = parseInt($('#editTransactionId').val(), 10) || 0;
                 
                 // If editing, use update handler
-                if (editId) {
+                if (editId > 0) {
                     const formData = {
                         action: 'update_payment',
                         transaction_id: editId,
@@ -1628,12 +1775,13 @@ if ($total_result && $transactions) {
                                 text: response.message || 'An error occurred'
                             });
                         }
-                    }, 'json').fail(function() {
-                        Swal.fire({
-                            icon: 'error',
-                            title: 'Error',
-                            text: 'An error occurred while processing your request'
-                        });
+                    }, 'json').fail(function(xhr) {
+                        let msg = 'An error occurred while processing your request';
+                        try {
+                            const j = JSON.parse(xhr.responseText || '{}');
+                            if (j.message) msg = j.message;
+                        } catch (err) { /* ignore */ }
+                        Swal.fire({ icon: 'error', title: 'Error', text: msg });
                     });
                     return;
                 }
@@ -1827,30 +1975,48 @@ if ($total_result && $transactions) {
                     if (response.status === 'success' && response.data) {
                         const data = response.data;
                         
-                        // Populate form fields
                         $('#receiptIdInput').val(data.receipt_id);
-                        $('[name="date_of_transaction"]').val(data.date_of_transaction);
-                        $('#partyId').val(data.party_id);
-                        $('#partyNameInput').val(data.party_name);
+                        
+                        let dateValue = '';
+                        if (data.date_of_transaction) {
+                            const date = new Date(data.date_of_transaction.replace(' ', 'T'));
+                            if (!isNaN(date.getTime())) {
+                                dateValue = date.toISOString().slice(0, 16);
+                            } else {
+                                dateValue = String(data.date_of_transaction).replace(' ', 'T').substring(0, 16);
+                            }
+                        }
+                        $('[name="date_of_transaction"]').val(dateValue);
+                        
+                        const pidTable = (data.party_id != null && String(data.party_id) !== '')
+                            ? parseInt(data.party_id, 10) : 0;
+                        if (pidTable > 0) {
+                            $('#partyId').val(String(pidTable));
+                            $('#partyNameInput').val((data.party_name || data.party_label || '').trim());
+                            selectedPartyName = (data.party_name || data.party_label || '').trim();
+                        } else {
+                            $('#partyId').val('');
+                            $('#partyNameInput').val((data.party_label || '').trim());
+                            selectedPartyName = '';
+                        }
                         $('[name="payment_amount"]').val(data.payment_amount);
                         $('[name="payment_method"]').val(data.payment_method);
                         $('[name="narration"]').val(data.narration || '');
                         
-                        // Store transaction ID for update
-                        $('#paymentForm').data('edit-id', transactionId);
+                        $('#editTransactionId').val(String(transactionId));
+                        $('#editModeIndicator').removeClass('hidden');
                         
-                        // Change form title/submit button
                         const submitBtn = $('#paymentForm button[type="submit"]');
-                        submitBtn.html('<i class="fas fa-save mr-2"></i>Update Payment');
-                        submitBtn.removeClass('bg-green-600 hover:bg-green-700').addClass('bg-blue-600 hover:bg-blue-700');
+                        submitBtn.html('<i class="fas fa-save mr-1"></i>Update receipt');
+                        submitBtn.attr('class', 'px-5 py-1.5 bg-orange-600 text-white text-xs font-bold rounded hover:bg-orange-700 shadow-sm');
+                        $('#paymentForm').closest('.bg-white').css('border', '2px solid #f97316');
+                        $('#deleteEditedPaymentBtn').removeClass('hidden');
                         
-                        // Scroll to form
                         $('html, body').animate({
                             scrollTop: $('#paymentForm').offset().top - 100
                         }, 500);
                         
-                        // Focus on first field
-                        $('#receiptIdInput').focus().select();
+                        $('#receiptIdInput').focus();
                     } else {
                         Swal.fire({
                             icon: 'error',
@@ -1874,15 +2040,10 @@ if ($total_result && $transactions) {
                 window.open('print_payment_receipt.php?id=' + transactionId, '_blank');
             });
 
-            // Delete payment button handler
-            $(document).on('click', '.delete-payment-btn', function() {
-                const transactionId = $(this).data('id');
-                const receiptId = $(this).data('receipt-id');
-                const amount = $(this).data('amount');
-                
+            function confirmAndDeletePayment(transactionId, receiptLabel, amount) {
                 Swal.fire({
                     title: 'Delete Payment?',
-                    html: `Are you sure you want to delete payment <b>${receiptId}</b> for <b>₹${parseFloat(amount).toLocaleString('en-IN')}</b>?<br><br><span class="text-red-600 text-sm">This will reverse the balance adjustment for the customer.</span>`,
+                    html: `Are you sure you want to delete payment <b>${receiptLabel}</b> for <b>₹${parseFloat(amount).toLocaleString('en-IN')}</b>?<br><br><span class="text-red-600 text-sm">This will reverse the balance adjustment for the customer.</span>`,
                     icon: 'warning',
                     showCancelButton: true,
                     confirmButtonText: 'Yes, Delete',
@@ -1922,6 +2083,22 @@ if ($total_result && $transactions) {
                         });
                     }
                 });
+            }
+
+            $('#deleteEditedPaymentBtn').on('click', function() {
+                const tid = parseInt($('#editTransactionId').val(), 10) || 0;
+                if (tid <= 0) return;
+                const rid = ($('#receiptIdInput').val() || '').trim() || ('PAY#' + tid);
+                const amt = parseFloat($('[name="payment_amount"]').val()) || 0;
+                confirmAndDeletePayment(tid, rid, amt);
+            });
+
+            // Delete payment button handler
+            $(document).on('click', '.delete-payment-btn', function() {
+                const transactionId = $(this).data('id');
+                const receiptId = $(this).data('display-id') || $(this).data('receipt-id');
+                const amount = $(this).data('amount');
+                confirmAndDeletePayment(transactionId, receiptId, amount);
             });
 
             // Reset form function
@@ -1937,13 +2114,15 @@ if ($total_result && $transactions) {
                 $('[name="payment_method"]').val('');
                 $('[name="narration"]').val('');
                 
-                // Remove edit mode
-                $('#paymentForm').removeData('edit-id');
+                $('#editTransactionId').val('');
+                $('#editModeIndicator').addClass('hidden');
+                $('#paymentForm').closest('.bg-white').css('border', '');
                 
                 // Reset submit button
                 const submitBtn = $('#paymentForm button[type="submit"]');
-                submitBtn.html('<i class="fas fa-money-bill-wave mr-2"></i>Record Payment');
-                submitBtn.removeClass('bg-blue-600 hover:bg-blue-700').addClass('bg-green-600 hover:bg-green-700');
+                submitBtn.html('<i class="fas fa-save mr-1"></i>Record payment');
+                submitBtn.attr('class', 'px-5 py-1.5 bg-emerald-600 text-white text-xs font-bold rounded hover:bg-emerald-700 shadow-sm');
+                $('#deleteEditedPaymentBtn').addClass('hidden');
                 
                 // Regenerate payment ID and reset date
                 initializeForm();
@@ -1955,8 +2134,6 @@ if ($total_result && $transactions) {
             }
         });
     </script>
-</body>
-</html>
 
 <?php
 // Capture the content
