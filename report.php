@@ -320,6 +320,39 @@ ob_start();
     .ex-transfer-btn:hover { background: rgb(254 243 199); }
     .ex-transfer-btn:disabled { opacity: 0.45; cursor: not-allowed; }
     .ex-xferred-tag { font-size: 8px; font-weight: 700; color: rgb(16 185 129); text-transform: uppercase; }
+
+    /* Compact stock modals (SweetAlert2) */
+    .swal2-popup.rpt-stock-modal { width: 25.5rem !important; max-width: calc(100vw - 2rem) !important; padding: 1.35rem 1.5rem 1.5rem !important; border-radius: 0.9rem !important; }
+    .swal2-popup.rpt-stock-modal .swal2-title { font-size: 1.05rem !important; font-weight: 800 !important; padding: 0 0 0.15rem !important; color: rgb(30 41 59); }
+    .swal2-popup.rpt-stock-modal .swal2-html-container { margin: 0.35rem 0 0 !important; padding: 0 !important; overflow: visible !important; font-size: 12.5px !important; }
+    .swal2-popup.rpt-stock-modal .swal2-actions { margin: 1.1rem 0 0 !important; gap: 0.55rem !important; flex-wrap: wrap; width: 100%; }
+    .swal2-popup.rpt-stock-modal .swal2-styled { font-size: 12px !important; font-weight: 700 !important; padding: 0.55rem 1.1rem !important; margin: 0 !important; border-radius: 0.5rem !important; }
+    .swal2-popup.rpt-stock-modal .swal2-footer { margin: 0.75rem 0 0 !important; padding: 0.6rem 0 0 !important; border-top: 1px solid rgb(241 245 249) !important; }
+    .rpt-stock-form { text-align: left; }
+    .rpt-stock-badge { display: flex; align-items: center; gap: 0.6rem; background: rgb(255 251 235); border: 1px solid rgb(253 230 138); border-radius: 0.6rem; padding: 0.55rem 0.7rem; margin-bottom: 0.9rem; }
+    .rpt-stock-badge .rpt-stock-badge-icon { width: 2.1rem; height: 2.1rem; border-radius: 0.5rem; background: rgb(253 230 138); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .rpt-stock-badge .rpt-stock-badge-icon i { color: rgb(146 64 14); font-size: 13px; }
+    .rpt-stock-badge-name { font-size: 12.5px; font-weight: 800; color: rgb(120 53 15); line-height: 1.25; }
+    .rpt-stock-badge-sub { font-size: 10.5px; font-weight: 600; color: rgb(180 130 40); text-transform: uppercase; letter-spacing: 0.02em; }
+    .rpt-stock-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 0.75rem; align-items: end; }
+    .rpt-field label { display: block; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: rgb(100 116 139); margin-bottom: 4px; }
+    .rpt-field input,
+    .rpt-field select { width: 100% !important; margin: 0 !important; padding: 0.55rem 0.65rem !important; font-size: 13px !important; font-weight: 600; border: 1.5px solid rgb(226 232 240); border-radius: 0.5rem; box-sizing: border-box; color: rgb(30 41 59); }
+    .rpt-field input::placeholder { font-weight: 400; color: rgb(148 163 184); }
+    .rpt-field input:focus,
+    .rpt-field select:focus { outline: none; border-color: rgb(217 119 6); box-shadow: 0 0 0 3px rgba(217,119,6,.15); }
+    .rpt-col-3 { grid-column: span 3; }
+    .rpt-col-4 { grid-column: span 4; }
+    .rpt-col-5 { grid-column: span 5; }
+    .rpt-col-6 { grid-column: span 6; }
+    .rpt-col-8 { grid-column: span 8; }
+    .rpt-col-12 { grid-column: span 12; }
+    .rpt-stock-hint { font-size: 9px; color: rgb(100 116 139); line-height: 1.3; margin-bottom: 0.35rem; }
+    .rpt-stock-clear-btn { background: none; border: none; color: rgb(100 116 139); font-size: 11px; font-weight: 700; cursor: pointer; padding: 0.2rem 0; display: inline-flex; align-items: center; gap: 0.3rem; }
+    .rpt-stock-clear-btn:hover { color: rgb(217 119 6); }
+    .stock-card-clickable { cursor: pointer; transition: box-shadow .15s ease, border-color .15s ease, transform .15s ease; }
+    .stock-card-clickable:hover { box-shadow: 0 4px 14px -4px rgba(15,23,42,.18); border-color: rgb(203 213 225); transform: translateY(-1px); }
+    .stock-card-clickable:active { transform: translateY(0); }
 </style>
 
 <div class="w-full">
@@ -330,7 +363,7 @@ ob_start();
 
             <!-- Cash -->
             <?php if ((float) ($balance_data['cash_balance'] ?? 0) > 0.0005): ?>
-            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card relative">
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card stock-card-clickable relative" onclick="openAddCashModal();" title="Click to add cash">
                 <div class="flex items-center justify-between gap-2">
                     <div class="min-w-0 flex-1">
                         <p class="stats-card-label uppercase">Cash In Hand</p>
@@ -343,7 +376,7 @@ ob_start();
                         <button type="button" class="card-menu-btn" onclick="toggleCardMenu(event, 'menu-cash')" aria-label="Cash actions"><i class="fas fa-ellipsis-v text-[10px]"></i></button>
                     </div>
                 </div>
-                <div id="menu-cash" class="card-menu hidden">
+                <div id="menu-cash" class="card-menu hidden" onclick="event.stopPropagation();">
                     <button onclick="closeAllCardMenus(); openAddCashModal();"><i class="fas fa-plus"></i> Add Cash</button>
                     <button onclick="closeAllCardMenus(); openTransactionsModal('cash');"><i class="fas fa-clock-rotate-left"></i> History</button>
                     <button class="danger" onclick="closeAllCardMenus(); openResetCashModal();"><i class="fas fa-rotate-left"></i> Reset</button>
@@ -353,7 +386,7 @@ ob_start();
 
             <!-- Bank -->
             <?php if ((float) ($balance_data['bank_balance'] ?? 0) > 0.0005): ?>
-            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card relative">
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card stock-card-clickable relative" onclick="openAddBankModal();" title="Click to add bank amount">
                 <div class="flex items-center justify-between gap-2">
                     <div class="min-w-0 flex-1">
                         <p class="stats-card-label uppercase">Bank Balance</p>
@@ -366,7 +399,7 @@ ob_start();
                         <button type="button" class="card-menu-btn" onclick="toggleCardMenu(event, 'menu-bank')" aria-label="Bank actions"><i class="fas fa-ellipsis-v text-[10px]"></i></button>
                     </div>
                 </div>
-                <div id="menu-bank" class="card-menu hidden">
+                <div id="menu-bank" class="card-menu hidden" onclick="event.stopPropagation();">
                     <button onclick="closeAllCardMenus(); openAddBankModal();"><i class="fas fa-plus"></i> Add Bank</button>
                     <button onclick="closeAllCardMenus(); openTransactionsModal('bank');"><i class="fas fa-clock-rotate-left"></i> History</button>
                     <button class="danger" onclick="closeAllCardMenus(); openResetBankModal();"><i class="fas fa-rotate-left"></i> Reset</button>
@@ -391,7 +424,7 @@ ob_start();
                 $menu_id = 'menu-stock-' . (int) $stock['id'];
                 $stock_name_js = htmlspecialchars($stock['stock_name'], ENT_QUOTES, 'UTF-8');
             ?>
-            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card relative">
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card stock-card-clickable relative" onclick="openAddStockModal(<?= (int) $stock['id'] ?>, '<?= $stock_name_js ?>', <?= (float) $stock['purity'] ?>, '<?= $stock['category'] ?>', '<?= $stock['mode'] ?>');" title="Click to add / update weight">
                 <div class="flex items-center justify-between gap-2">
                     <div class="min-w-0 flex-1">
                         <p class="stats-card-label uppercase truncate inline-flex items-center gap-1 flex-wrap">
@@ -428,7 +461,7 @@ ob_start();
                         <button type="button" class="card-menu-btn" onclick="toggleCardMenu(event, '<?= $menu_id ?>')" aria-label="Stock actions"><i class="fas fa-ellipsis-v text-[10px]"></i></button>
                     </div>
                 </div>
-                <div id="<?= $menu_id ?>" class="card-menu hidden">
+                <div id="<?= $menu_id ?>" class="card-menu hidden" onclick="event.stopPropagation();">
                     <button onclick="closeAllCardMenus(); openAddStockModal(<?= (int) $stock['id'] ?>, '<?= $stock_name_js ?>', <?= (float) $stock['purity'] ?>, '<?= $stock['category'] ?>', '<?= $stock['mode'] ?>');"><i class="fas fa-plus"></i> Add Weight</button>
                     <button onclick="closeAllCardMenus(); openTransactionsModal('stock', <?= (int) $stock['id'] ?>);"><i class="fas fa-clock-rotate-left"></i> History</button>
                     <button class="danger" onclick="closeAllCardMenus(); openResetStockModal(<?= (int) $stock['id'] ?>, '<?= $stock_name_js ?>', <?= (float) $stock['purity'] ?>);"><i class="fas fa-rotate-left"></i> Reset</button>
@@ -438,7 +471,7 @@ ob_start();
 
             <!-- Synthetic (placeholder) Mix cards when no real row exists yet -->
             <?php if ($show_synth_mix_gold): ?>
-            <div class="bg-white rounded-xl p-3 shadow-sm border border-dashed border-amber-200 stats-card">
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-dashed border-amber-200 stats-card stock-card-clickable" onclick="openAddStockModalPrefilled('Gold', 'Mix Gold');" title="Click to add Mix Gold stock">
                 <div class="flex items-center justify-between gap-2">
                     <div class="min-w-0 flex-1">
                         <p class="stats-card-label uppercase inline-flex items-center gap-1"><i class="fas fa-coins text-amber-600 text-[10px]" aria-hidden="true"></i> Mix Gold</p>
@@ -450,7 +483,7 @@ ob_start();
             </div>
             <?php endif; ?>
             <?php if ($show_synth_mix_silver): ?>
-            <div class="bg-white rounded-xl p-3 shadow-sm border border-dashed border-slate-300 stats-card">
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-dashed border-slate-300 stats-card stock-card-clickable" onclick="openAddStockModalPrefilled('Silver', 'Mix Silver');" title="Click to add Mix Silver stock">
                 <div class="flex items-center justify-between gap-2">
                     <div class="min-w-0 flex-1">
                         <p class="stats-card-label uppercase inline-flex items-center gap-1"><i class="fas fa-coins text-slate-500 text-[10px]" aria-hidden="true"></i> Mix Silver</p>
@@ -873,57 +906,102 @@ function openAddStockModalFree() {
 function openAddStockModal(stockId, stockName, purity, category, mode) {
     showAddStockSwal({ stockId, stockName, purity, category, mode });
 }
+function openAddStockModalPrefilled(category, stockName) {
+    showAddStockSwal({ newCategory: category, newStockName: stockName });
+}
 function showAddStockSwal(prefill) {
     const isExisting = !!prefill.stockId;
+    const stockLabel = isExisting ? `${prefill.stockName} · ${prefill.purity}%` : '';
+
+    function clearAddStockFields() {
+        const w = document.getElementById('swalWeight');
+        const n = document.getElementById('swalNotes');
+        if (w) w.value = '';
+        if (n) n.value = '';
+        if (!isExisting) {
+            const sn = document.getElementById('swalStockName');
+            const pu = document.getElementById('swalPurity');
+            const cat = document.getElementById('swalCategory');
+            const mode = document.getElementById('swalMode');
+            if (sn) sn.value = '';
+            if (pu) pu.value = '';
+            if (cat) cat.value = 'Gold';
+            if (mode) mode.value = 'Cash';
+        }
+        if (w) w.focus();
+    }
+
     Swal.fire({
-        title: isExisting ? `Add Weight — ${prefill.stockName} (${prefill.purity}%)` : 'Add Gold / Silver Stock',
+        title: isExisting ? 'Add / Update Weight' : 'Add New Stock',
         html: `
-            <div class="text-left space-y-2.5">
-                ${isExisting ? '' : `
-                <div>
-                    <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Category</label>
-                    <select id="swalCategory" class="swal2-select" style="margin:0;width:100%;">
-                        <option value="Gold">Gold</option>
-                        <option value="Silver">Silver</option>
-                    </select>
-                </div>
-                <div>
-                    <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Stock Name</label>
-                    <input id="swalStockName" class="swal2-input" style="margin:0;width:100%;" placeholder="e.g. Fine Gold, 22K">
-                </div>
-                <div class="grid grid-cols-2 gap-2">
-                    <div>
-                        <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Purity (%)</label>
-                        <input id="swalPurity" type="number" step="0.01" class="swal2-input" style="margin:0;width:100%;" placeholder="0.00">
+            <div class="rpt-stock-form">
+                ${isExisting ? `
+                <div class="rpt-stock-badge">
+                    <div class="rpt-stock-badge-icon"><i class="fas fa-coins"></i></div>
+                    <div class="min-w-0">
+                        <div class="rpt-stock-badge-name">${String(prefill.stockName).replace(/</g, '&lt;')}</div>
+                        <div class="rpt-stock-badge-sub">${prefill.purity}% &middot; ${prefill.mode === 'Cash' ? 'Cash (Kachha)' : 'Bank (Pakka)'}</div>
                     </div>
-                    <div>
-                        <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Mode</label>
-                        <select id="swalMode" class="swal2-select" style="margin:0;width:100%;">
+                </div>` : ''}
+                <div class="rpt-stock-grid">
+                ${isExisting ? '' : `
+                    <div class="rpt-field rpt-col-6">
+                        <label>Category</label>
+                        <select id="swalCategory">
+                            <option value="Gold">Gold</option>
+                            <option value="Silver">Silver</option>
+                        </select>
+                    </div>
+                    <div class="rpt-field rpt-col-6">
+                        <label>Mode</label>
+                        <select id="swalMode">
                             <option value="Cash">Cash (Kachha)</option>
                             <option value="Bank">Bank (Pakka)</option>
                         </select>
                     </div>
-                </div>
+                    <div class="rpt-field rpt-col-8">
+                        <label>Stock name</label>
+                        <input id="swalStockName" type="text" placeholder="Fine Gold, 22K">
+                    </div>
+                    <div class="rpt-field rpt-col-4">
+                        <label>Purity %</label>
+                        <input id="swalPurity" type="number" step="0.01" placeholder="0.00">
+                    </div>
                 `}
-                <div>
-                    <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Weight to Add (g)</label>
-                    <input id="swalWeight" type="number" step="0.001" class="swal2-input" style="margin:0;width:100%;" placeholder="0.000">
-                </div>
-                <div>
-                    <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Notes</label>
-                    <textarea id="swalNotes" class="swal2-textarea" style="margin:0;width:100%;" placeholder="Optional"></textarea>
+                    <div class="rpt-field rpt-col-6">
+                        <label>Weight (g)</label>
+                        <input id="swalWeight" type="number" step="0.001" placeholder="0.000">
+                    </div>
+                    <div class="rpt-field rpt-col-6">
+                        <label>Notes</label>
+                        <input id="swalNotes" type="text" placeholder="Optional">
+                    </div>
                 </div>
             </div>
         `,
+        customClass: { popup: 'rpt-stock-modal' },
         focusConfirm: false,
         showCancelButton: true,
-        confirmButtonText: '<i class="fas fa-plus mr-1"></i> Add Stock',
+        showDenyButton: isExisting,
+        denyButtonText: isExisting ? '<i class="fas fa-rotate-left mr-1"></i> Reset' : undefined,
+        denyButtonColor: '#dc2626',
+        confirmButtonText: isExisting ? '<i class="fas fa-plus mr-1"></i> Add Weight' : '<i class="fas fa-plus mr-1"></i> Add Stock',
         confirmButtonColor: '#d97706',
         cancelButtonColor: '#64748b',
+        reverseButtons: true,
+        footer: isExisting ? '' : '<button type="button" class="rpt-stock-clear-btn" id="swalClearStockForm"><i class="fas fa-undo"></i>Clear form</button>',
+        didOpen: () => {
+            if (!isExisting) {
+                document.getElementById('swalClearStockForm')?.addEventListener('click', clearAddStockFields);
+                if (prefill.newCategory) document.getElementById('swalCategory').value = prefill.newCategory;
+                if (prefill.newStockName) document.getElementById('swalStockName').value = prefill.newStockName;
+            }
+            document.getElementById('swalWeight')?.focus();
+        },
         preConfirm: () => {
             const weight = parseFloat(document.getElementById('swalWeight').value) || 0;
             if (weight <= 0) { Swal.showValidationMessage('Enter a valid weight'); return false; }
-            const data = { amount: weight, notes: document.getElementById('swalNotes').value || '' };
+            const data = { amount: weight, notes: (document.getElementById('swalNotes').value || '').trim() };
             if (isExisting) {
                 data.stock_id = prefill.stockId;
                 data.category = prefill.category;
@@ -941,30 +1019,43 @@ function showAddStockSwal(prefill) {
             return data;
         }
     }).then(result => {
-        if (result.isConfirmed) postStockCashAction('add_stock', result.value);
+        if (result.isConfirmed) {
+            postStockCashAction('add_stock', result.value);
+        } else if (result.isDenied && isExisting) {
+            openResetStockModal(prefill.stockId, prefill.stockName, prefill.purity);
+        }
     });
 }
 
 function openResetStockModal(stockId, stockName, purity) {
     Swal.fire({
-        title: `Reset ${stockName} (${purity}%)?`,
+        title: 'Reset Stock?',
         html: `
-            <div class="text-left space-y-2">
-                <div class="bg-amber-50 border border-amber-200 rounded-md p-2.5 text-xs text-amber-800">
-                    <i class="fas fa-triangle-exclamation mr-1"></i> This sets the stock to <b>0 g</b>. The action is logged.
+            <div class="rpt-stock-form">
+                <div class="rpt-stock-badge">
+                    <div class="rpt-stock-badge-icon"><i class="fas fa-coins"></i></div>
+                    <div class="min-w-0">
+                        <div class="rpt-stock-badge-name">${String(stockName).replace(/</g, '&lt;')}</div>
+                        <div class="rpt-stock-badge-sub">${purity}% purity</div>
+                    </div>
                 </div>
-                <div>
-                    <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Reason for reset</label>
-                    <textarea id="swalResetNotes" class="swal2-textarea" style="margin:0;width:100%;" placeholder="Optional"></textarea>
+                <div class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-[11px] text-red-700 mb-3 leading-snug">
+                    <i class="fas fa-triangle-exclamation mr-1"></i> This sets the stock weight to <b>0 g</b>. The action is logged in history and cannot be undone.
+                </div>
+                <div class="rpt-field">
+                    <label>Reason (optional)</label>
+                    <input id="swalResetNotes" type="text" placeholder="e.g. Stock correction">
                 </div>
             </div>
         `,
-        icon: 'warning',
+        customClass: { popup: 'rpt-stock-modal' },
         showCancelButton: true,
-        confirmButtonText: '<i class="fas fa-rotate-left mr-1"></i> Reset to 0',
+        reverseButtons: true,
+        confirmButtonText: '<i class="fas fa-rotate-left mr-1"></i> Reset Stock',
         confirmButtonColor: '#dc2626',
         cancelButtonColor: '#64748b',
-        preConfirm: () => ({ stock_id: stockId, purity: purity, notes: document.getElementById('swalResetNotes').value || '' })
+        focusConfirm: false,
+        preConfirm: () => ({ stock_id: stockId, purity: purity, notes: (document.getElementById('swalResetNotes').value || '').trim() })
     }).then(result => {
         if (result.isConfirmed) postStockCashAction('reset_stock', result.value);
     });
@@ -973,73 +1064,118 @@ function openResetStockModal(stockId, stockName, purity) {
 /* ============================================================
    Add / Reset Cash & Bank
    ============================================================ */
-function showAmountNotesSwal({ title, confirmText, confirmColor, icon }) {
+function showAmountNotesSwal({ title, confirmText, confirmColor, badgeIcon, badgeBg, badgeIconColor, badgeLabel }) {
     return Swal.fire({
         title,
-        icon: icon || undefined,
         html: `
-            <div class="text-left space-y-2.5">
-                <div>
-                    <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Amount (&#8377;)</label>
-                    <input id="swalAmount" type="number" step="0.01" class="swal2-input" style="margin:0;width:100%;" placeholder="0.00">
+            <div class="rpt-stock-form">
+                <div class="rpt-stock-badge" style="background:${badgeBg.bg};border-color:${badgeBg.border};">
+                    <div class="rpt-stock-badge-icon" style="background:${badgeBg.iconBg};"><i class="fas ${badgeIcon}" style="color:${badgeIconColor};"></i></div>
+                    <div class="min-w-0">
+                        <div class="rpt-stock-badge-name" style="color:${badgeBg.text};">${badgeLabel}</div>
+                        <div class="rpt-stock-badge-sub" style="color:${badgeBg.subtext};">Enter amount below</div>
+                    </div>
                 </div>
-                <div>
-                    <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Notes</label>
-                    <textarea id="swalNotes2" class="swal2-textarea" style="margin:0;width:100%;" placeholder="Optional"></textarea>
+                <div class="rpt-stock-grid">
+                    <div class="rpt-field rpt-col-12">
+                        <label>Amount (&#8377;)</label>
+                        <input id="swalAmount" type="number" step="0.01" placeholder="0.00">
+                    </div>
+                    <div class="rpt-field rpt-col-12">
+                        <label>Notes</label>
+                        <input id="swalNotes2" type="text" placeholder="Optional">
+                    </div>
                 </div>
             </div>
         `,
+        customClass: { popup: 'rpt-stock-modal' },
         focusConfirm: false,
         showCancelButton: true,
+        reverseButtons: true,
         confirmButtonText: confirmText,
         confirmButtonColor: confirmColor,
         cancelButtonColor: '#64748b',
+        didOpen: () => { document.getElementById('swalAmount')?.focus(); },
         preConfirm: () => {
             const amount = parseFloat(document.getElementById('swalAmount').value) || 0;
             if (amount <= 0) { Swal.showValidationMessage('Enter a valid amount'); return false; }
-            return { amount, notes: document.getElementById('swalNotes2').value || '' };
+            return { amount, notes: (document.getElementById('swalNotes2').value || '').trim() };
         }
     });
 }
 
 function openAddCashModal() {
-    showAmountNotesSwal({ title: 'Add Cash', confirmText: '<i class="fas fa-plus mr-1"></i> Add Cash', confirmColor: '#059669' })
-        .then(result => { if (result.isConfirmed) postStockCashAction('add_cash', result.value); });
+    showAmountNotesSwal({
+        title: 'Add Cash',
+        confirmText: '<i class="fas fa-plus mr-1"></i> Add Cash',
+        confirmColor: '#059669',
+        badgeIcon: 'fa-wallet',
+        badgeIconColor: '#047857',
+        badgeLabel: 'Cash In Hand',
+        badgeBg: { bg: '#ecfdf5', border: '#a7f3d0', iconBg: '#a7f3d0', text: '#065f46', subtext: '#0d9488' }
+    }).then(result => { if (result.isConfirmed) postStockCashAction('add_cash', result.value); });
 }
 function openAddBankModal() {
-    showAmountNotesSwal({ title: 'Add Bank Amount', confirmText: '<i class="fas fa-plus mr-1"></i> Add Bank', confirmColor: '#0284c7' })
-        .then(result => { if (result.isConfirmed) postStockCashAction('add_bank', result.value); });
+    showAmountNotesSwal({
+        title: 'Add Bank Amount',
+        confirmText: '<i class="fas fa-plus mr-1"></i> Add Bank',
+        confirmColor: '#0284c7',
+        badgeIcon: 'fa-university',
+        badgeIconColor: '#0369a1',
+        badgeLabel: 'Bank Balance',
+        badgeBg: { bg: '#f0f9ff', border: '#bae6fd', iconBg: '#bae6fd', text: '#075985', subtext: '#0284c7' }
+    }).then(result => { if (result.isConfirmed) postStockCashAction('add_bank', result.value); });
 }
 
-function showResetBalanceSwal({ title, actionLabel }) {
+function showResetBalanceSwal({ title, actionLabel, badgeIcon, badgeBg, badgeIconColor, badgeLabel }) {
     return Swal.fire({
         title,
-        icon: 'warning',
         html: `
-            <div class="text-left space-y-2">
-                <div class="bg-amber-50 border border-amber-200 rounded-md p-2.5 text-xs text-amber-800">
-                    <i class="fas fa-triangle-exclamation mr-1"></i> This sets the balance to <b>&#8377;0</b>. The action is logged.
+            <div class="rpt-stock-form">
+                <div class="rpt-stock-badge" style="background:${badgeBg.bg};border-color:${badgeBg.border};">
+                    <div class="rpt-stock-badge-icon" style="background:${badgeBg.iconBg};"><i class="fas ${badgeIcon}" style="color:${badgeIconColor};"></i></div>
+                    <div class="min-w-0">
+                        <div class="rpt-stock-badge-name" style="color:${badgeBg.text};">${badgeLabel}</div>
+                    </div>
                 </div>
-                <div>
-                    <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Reason for reset</label>
-                    <textarea id="swalResetNotes2" class="swal2-textarea" style="margin:0;width:100%;" placeholder="Optional"></textarea>
+                <div class="bg-red-50 border border-red-200 rounded-lg px-3 py-2 text-[11px] text-red-700 mb-3 leading-snug">
+                    <i class="fas fa-triangle-exclamation mr-1"></i> This sets the balance to <b>&#8377;0</b>. The action is logged in history and cannot be undone.
+                </div>
+                <div class="rpt-field">
+                    <label>Reason (optional)</label>
+                    <input id="swalResetNotes2" type="text" placeholder="Optional">
                 </div>
             </div>
         `,
+        customClass: { popup: 'rpt-stock-modal' },
         showCancelButton: true,
+        reverseButtons: true,
         confirmButtonText: `<i class="fas fa-rotate-left mr-1"></i> ${actionLabel}`,
         confirmButtonColor: '#dc2626',
         cancelButtonColor: '#64748b',
-        preConfirm: () => ({ notes: document.getElementById('swalResetNotes2').value || '' })
+        focusConfirm: false,
+        preConfirm: () => ({ notes: (document.getElementById('swalResetNotes2').value || '').trim() })
     });
 }
 function openResetCashModal() {
-    showResetBalanceSwal({ title: 'Reset Cash Balance?', actionLabel: 'Reset Cash' })
-        .then(result => { if (result.isConfirmed) postStockCashAction('reset_cash', result.value); });
+    showResetBalanceSwal({
+        title: 'Reset Cash Balance?',
+        actionLabel: 'Reset Cash',
+        badgeIcon: 'fa-wallet',
+        badgeIconColor: '#047857',
+        badgeLabel: 'Cash In Hand',
+        badgeBg: { bg: '#ecfdf5', border: '#a7f3d0', iconBg: '#a7f3d0', text: '#065f46' }
+    }).then(result => { if (result.isConfirmed) postStockCashAction('reset_cash', result.value); });
 }
 function openResetBankModal() {
-    showResetBalanceSwal({ title: 'Reset Bank Balance?', actionLabel: 'Reset Bank' })
-        .then(result => { if (result.isConfirmed) postStockCashAction('reset_bank', result.value); });
+    showResetBalanceSwal({
+        title: 'Reset Bank Balance?',
+        actionLabel: 'Reset Bank',
+        badgeIcon: 'fa-university',
+        badgeIconColor: '#0369a1',
+        badgeLabel: 'Bank Balance',
+        badgeBg: { bg: '#f0f9ff', border: '#bae6fd', iconBg: '#bae6fd', text: '#075985' }
+    }).then(result => { if (result.isConfirmed) postStockCashAction('reset_bank', result.value); });
 }
 
 /* ============================================================

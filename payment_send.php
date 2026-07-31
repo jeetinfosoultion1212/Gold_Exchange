@@ -97,6 +97,24 @@ function payment_send_category_label(?string $booking_type): string {
     return $bt !== '' ? $bt : 'Payment sent';
 }
 
+/** Indian-style number grouping for stat/list amounts (matches payment_receipt.php). */
+function ps_format_inr($amount, int $decimals = 0): string
+{
+    $amount = (float) $amount;
+    $negative = $amount < 0;
+    $amount = abs(round($amount, $decimals));
+    $parts = explode('.', number_format($amount, $decimals, '.', ''));
+    $integer = $parts[0];
+    $decimalPart = $decimals > 0 ? ('.' . $parts[1]) : '';
+    $lastThree = substr($integer, -3);
+    $rest = substr($integer, 0, -3);
+    if ($rest !== '') {
+        $lastThree = ',' . $lastThree;
+        $rest = (string) preg_replace('/\B(?=(\d{2})+(?!\d))/', ',', $rest);
+    }
+    return ($negative ? '-' : '') . $rest . $lastThree . $decimalPart;
+}
+
 /** Cash leg vs bank (UPI/Cheque/Card/Bank share bank_balance on party) */
 function payment_send_party_ledger_is_cash_leg(string $method): bool {
     return strcasecmp(trim($method), 'Cash') === 0;
@@ -601,13 +619,16 @@ if ($balance_result && ($br = $balance_result->fetch_assoc())) {
     $stats['bank_balance'] = (float) ($br['bank_balance'] ?? 0);
 }
 
-// Get recent payment out transactions
-$page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
-$limit = 10;
-$offset = ($page - 1) * $limit;
+// Get recent payment out transactions (date range + scroll list, same pattern as payment_receipt.php)
+$start_date = isset($_GET['start_date']) && !empty($_GET['start_date']) ? $_GET['start_date'] : date('Y-m-d');
+$end_date = isset($_GET['end_date']) && !empty($_GET['end_date']) ? $_GET['end_date'] : date('Y-m-d');
+$payment_list_limit = 100;
 
 $search = isset($_GET['search']) ? $conn->real_escape_string($_GET['search']) : '';
-$where_clause = $search ? "AND (p.party_name LIKE '%$search%' OR t.receipt_id LIKE '%$search%')" : '';
+$where_clause = "AND DATE(t.date_of_transaction) BETWEEN '$start_date' AND '$end_date'";
+if ($search) {
+    $where_clause .= " AND (p.party_name LIKE '%$search%' OR t.receipt_id LIKE '%$search%')";
+}
 
 $transactions_sql = "SELECT t.*, p.party_name, p.contact_no AS party_contact 
                     FROM transactions t 
@@ -617,11 +638,11 @@ $transactions_sql = "SELECT t.*, p.party_name, p.contact_no AS party_contact
                     AND t.company_id = $company_id
                     $where_clause 
                     ORDER BY t.date_of_transaction DESC, t.id DESC 
-                    LIMIT $offset, $limit";
+                    LIMIT $payment_list_limit";
 
 $transactions = $conn->query($transactions_sql);
+$transactions_list = ($transactions && $transactions->num_rows > 0) ? $transactions->fetch_all(MYSQLI_ASSOC) : [];
 
-// Count the total number of Payment Out transactions
 $total_sql = "SELECT COUNT(*) as count 
               FROM transactions t 
               LEFT JOIN parties p ON t.party_id = p.id
@@ -630,285 +651,419 @@ $total_sql = "SELECT COUNT(*) as count
               AND t.company_id = $company_id
               $where_clause";
 $total_result = $conn->query($total_sql);
-
-if ($total_result && $transactions) {
-    $total_transactions = $total_result->fetch_assoc()['count'];
-    $total_pages = ceil($total_transactions / $limit);
-} else {
-    $total_transactions = 0;
-    $total_pages = 0;
-    $transactions = false;
-}
+$total_transactions = ($total_result) ? (int) $total_result->fetch_assoc()['count'] : 0;
+$payment_list_has_more = $total_transactions > count($transactions_list);
 ?>
 
 <!-- Page-specific styles (body shell from components/layout.php) -->
 <style>
-    .responsive-table { width: 100% !important; table-layout: fixed !important; font-size: 0.75rem; }
-    .responsive-table th, .responsive-table td {
-        word-wrap: break-word; overflow-wrap: break-word; max-width: 0;
-        padding: 0.25rem 0.125rem;
-    }
-    #partyList {
-        position: absolute !important; top: 100% !important; left: 0 !important; right: 0 !important;
-        width: 100% !important; max-width: 100% !important; z-index: 1000 !important;
-    }
-    .soft-gradient-green { background: linear-gradient(135deg, rgba(34, 197, 94, 0.1), rgba(34, 197, 94, 0.05)); }
-    .soft-gradient-blue { background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(59, 130, 246, 0.05)); }
-    .soft-gradient-purple { background: linear-gradient(135deg, rgba(168, 85, 247, 0.1), rgba(168, 85, 247, 0.05)); }
-    .soft-gradient-teal { background: linear-gradient(135deg, rgba(20, 184, 166, 0.1), rgba(20, 184, 166, 0.05)); }
-    .soft-gradient-orange { background: linear-gradient(135deg, rgba(249, 115, 22, 0.1), rgba(249, 115, 22, 0.05)); }
-    .soft-gradient-rose { background: linear-gradient(135deg, rgba(244, 63, 94, 0.09), rgba(244, 63, 94, 0.03)); }
-    .compact-input { padding-top: 0.375rem !important; padding-bottom: 0.375rem !important; font-size: 0.75rem !important; }
-</style>
+        .stats-card-label {
+            font-size: 10px;
+            font-weight: 500;
+            letter-spacing: 0.02em;
+            color: rgb(100 116 139);
+        }
+        .stats-card-value {
+            font-size: 1rem;
+            font-weight: 600;
+            color: rgb(51 65 85);
+            font-variant-numeric: tabular-nums;
+        }
+        .stats-icon-wrap {
+            width: 2rem;
+            height: 2rem;
+            border-radius: 0.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .compact-input { padding-top: 0.375rem !important; padding-bottom: 0.375rem !important; font-size: 0.75rem !important; }
+        .compact-label { font-size: 0.65rem !important; margin-bottom: 0.1rem !important; }
+        #partyList {
+            position: absolute !important;
+            top: 100% !important;
+            left: 0 !important;
+            right: 0 !important;
+            width: 100% !important;
+            z-index: 1000 !important;
+        }
+        .ge-action-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 1.4rem;
+            height: 1.4rem;
+            border-radius: 0.25rem;
+            flex-shrink: 0;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            padding: 0;
+        }
+        .ge-action-btn i { font-size: 10px; line-height: 1; pointer-events: none; }
+        .ge-action-btn:hover { background: rgba(148, 163, 184, 0.18); }
+        .ge-txn-table .ge-action-col {
+            width: 3.75rem;
+            min-width: 3.75rem;
+            padding-left: 0.2rem !important;
+            padding-right: 0.3rem !important;
+        }
+        .ge-txn-scroll {
+            max-height: calc(100vh - 300px);
+            min-height: 220px;
+            overflow-y: auto;
+            overflow-x: auto;
+        }
+        .ge-txn-scroll thead th {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            background-color: #f8fafc;
+            box-shadow: 0 1px 0 #e2e8f0;
+        }
+        .ge-txn-table thead th { white-space: nowrap; }
+        .ge-txn-table .ge-serial-col {
+            width: 1.75rem;
+            min-width: 1.75rem;
+            padding-left: 0.35rem !important;
+            padding-right: 0.25rem !important;
+            text-align: center;
+        }
+        .ge-txn-table .ge-party-col {
+            width: 5.75rem;
+            max-width: 5.75rem;
+            padding-left: 0.3rem !important;
+            padding-right: 0.3rem !important;
+        }
+        .ge-txn-table td,
+        .ge-txn-table th {
+            padding-left: 0.35rem;
+            padding-right: 0.35rem;
+        }
+        .ge-txn-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+        .ge-txn-scroll::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.5); border-radius: 3px; }
+        .ge-txn-scroll::-webkit-scrollbar-track { background: transparent; }
+        .pr-form-section { padding: 0.375rem 0.5rem; }
+        .pr-form-grid {
+            display: grid;
+            grid-template-columns: repeat(12, minmax(0, 1fr));
+            gap: 0.375rem;
+            align-items: end;
+        }
+        .pr-form-footer {
+            padding: 0.375rem 0.5rem;
+            border-top: 1px solid #e5e7eb;
+            background: #f9fafb;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 0.25rem;
+        }
+        .validation-error {
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: 100%;
+            z-index: 40;
+            font-size: 9px;
+            line-height: 1.15;
+            color: #dc2626;
+            margin-top: 1px;
+            pointer-events: none;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .validation-error.hidden { display: none; }
+        input.border-red-500, select.border-red-500, textarea.border-red-500 {
+            border-color: #ef4444 !important;
+            box-shadow: 0 0 0 1px #ef4444;
+        }
+    </style>
 
-<div class="w-full px-1 pb-4">
-    <div class="grid grid-cols-2 md:grid-cols-2 lg:grid-cols-4 gap-2 mb-3">
-        <div class="soft-gradient-green rounded-xl p-2 shadow-sm border border-slate-200/50">
-            <div class="flex items-center justify-between">
-                <div>
-                    <p class="text-[9px] font-bold text-emerald-800 uppercase tracking-tighter opacity-80 leading-none mb-0.5">Cash in hand</p>
-                    <p class="text-[13px] font-bold text-emerald-900 leading-none">₹<?= number_format($stats['cash_in_hand'] ?? 0, 0) ?></p>
-                    <p class="text-[9px] text-emerald-700/80">Company</p>
-                </div>
-                <div class="w-6 h-6 bg-emerald-500 rounded flex items-center justify-center">
-                    <i class="fas fa-wallet text-white text-[9px]"></i>
-                </div>
-            </div>
-        </div>
-        <div class="soft-gradient-blue rounded-xl p-2 shadow-sm border border-slate-200/50">
-            <div class="flex items-center justify-between">
-                <div>
-                    <p class="text-[9px] font-bold text-blue-800 uppercase tracking-tighter opacity-80 leading-none mb-0.5">Bank balance</p>
-                    <p class="text-[13px] font-bold text-blue-900 leading-none">₹<?= number_format($stats['bank_balance'] ?? 0, 0) ?></p>
-                    <p class="text-[9px] text-blue-700/80">Company</p>
-                </div>
-                <div class="w-6 h-6 bg-blue-500 rounded flex items-center justify-center">
-                    <i class="fas fa-university text-white text-[9px]"></i>
+<div class="w-full min-w-0 px-1 pb-4">
+    <div class="overflow-x-auto pb-1 -mx-0.5 px-0.5">
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3 min-w-0 w-full">
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Cash in hand</p>
+                        <p class="stats-card-value leading-tight">₹<?= ps_format_inr($stats['cash_in_hand'] ?? 0) ?></p>
+                    </div>
+                    <div class="stats-icon-wrap bg-emerald-100 shrink-0">
+                        <i class="fas fa-wallet text-emerald-600 text-xs"></i>
+                    </div>
                 </div>
             </div>
-        </div>
-        <div class="soft-gradient-rose rounded-xl p-2 shadow-sm border border-slate-200/50">
-            <div class="flex items-center justify-between">
-                <div>
-                    <p class="text-[9px] font-bold text-rose-800 uppercase tracking-tighter opacity-80 leading-none mb-0.5">Cash paid</p>
-                    <p class="text-[13px] font-bold text-rose-900 leading-none">₹<?= number_format($stats['total_cash_paid'] ?? 0, 0) ?></p>
-                    <p class="text-[9px] text-rose-700/80">Today</p>
-                </div>
-                <div class="w-6 h-6 bg-rose-500 rounded flex items-center justify-center">
-                    <i class="fas fa-money-bill-wave text-white text-[9px]"></i>
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Bank balance</p>
+                        <p class="stats-card-value leading-tight">₹<?= ps_format_inr($stats['bank_balance'] ?? 0) ?></p>
+                    </div>
+                    <div class="stats-icon-wrap bg-blue-100 shrink-0">
+                        <i class="fas fa-university text-blue-600 text-xs"></i>
+                    </div>
                 </div>
             </div>
-        </div>
-        <div class="soft-gradient-orange rounded-xl p-2 shadow-sm border border-slate-200/50">
-            <div class="flex items-center justify-between">
-                <div>
-                    <p class="text-[9px] font-bold text-orange-800 uppercase tracking-tighter opacity-80 leading-none mb-0.5">Bank paid</p>
-                    <p class="text-[13px] font-bold text-orange-900 leading-none">₹<?= number_format($stats['total_bank_paid'] ?? 0, 0) ?></p>
-                    <p class="text-[9px] text-orange-700/80">Today</p>
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Cash paid</p>
+                        <p class="stats-card-value leading-tight">₹<?= ps_format_inr($stats['total_cash_paid'] ?? 0) ?></p>
+                    </div>
+                    <div class="stats-icon-wrap bg-rose-100 shrink-0">
+                        <i class="fas fa-money-bill-wave text-rose-600 text-xs"></i>
+                    </div>
                 </div>
-                <div class="w-6 h-6 bg-orange-500 rounded flex items-center justify-center">
-                    <i class="fas fa-university text-white text-[9px]"></i>
+            </div>
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Bank paid</p>
+                        <p class="stats-card-value leading-tight">₹<?= ps_format_inr($stats['total_bank_paid'] ?? 0) ?></p>
+                    </div>
+                    <div class="stats-icon-wrap bg-orange-100 shrink-0">
+                        <i class="fas fa-building-columns text-orange-600 text-xs"></i>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <div class="flex flex-col lg:flex-row gap-3">
-        <div class="bg-white rounded-lg shadow-md border border-gray-200 overflow-hidden" style="flex: 0 0 55%;">
+    <div class="flex flex-col lg:flex-row gap-4 min-w-0 w-full lg:items-start">
+        <div id="paymentOutFormCard" class="bg-white rounded-lg shadow-md border border-gray-200 min-w-0 lg:flex-[1_1_55%] overflow-hidden self-start w-full">
             <form id="paymentOutForm" method="POST" class="overflow-hidden" onsubmit="return false;">
                 <input type="hidden" name="action" value="save_payment_out">
                 <input type="hidden" name="party_id" id="partyId">
                 <input type="hidden" id="editTransactionId" value="">
 
-                <div class="bg-rose-50 px-3 py-1 border-b border-rose-100">
-                    <h3 class="text-xs font-bold text-rose-900 flex items-center">
-                        <i class="fas fa-paper-plane mr-1.5 text-xs"></i> Send payment
+                <div class="bg-blue-50 px-3 py-1 border-b border-blue-100">
+                    <h3 class="text-xs font-bold text-blue-800 flex items-center">
+                        <i class="fas fa-file-invoice mr-1.5 text-xs"></i> Transaction Details
+                        <span id="editModeIndicator" class="ml-2 text-orange-600 hidden text-[10px]">(Edit)</span>
                     </h3>
                 </div>
-                <div class="p-2 grid grid-cols-12 gap-1.5">
-                    <div class="relative col-span-3">
-                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter">Payment ID <span id="editModeIndicator" class="text-orange-600 hidden">(Edit)</span></label>
+                <div class="pr-form-section pr-form-grid">
+                    <div class="relative col-span-12 sm:col-span-4 lg:col-span-3">
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Payment ID</label>
                         <div class="relative">
                             <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-gray-500"><i class="fas fa-hashtag text-xs"></i></span>
                             <input type="text" name="receipt_id" readonly id="paymentIdInput" tabindex="0"
-                                class="block w-full pl-7 pr-8 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-rose-400 cursor-pointer">
-                            <button type="button" class="absolute right-1 top-1/2 -translate-y-1/2 text-gray-400 hover:text-rose-600" id="showPaymentListBtn" title="History"><i class="fas fa-history text-xs"></i></button>
+                                class="block w-full pl-7 pr-8 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-blue-400 focus:border-blue-400 compact-input cursor-pointer"
+                                placeholder="Auto..." title="Click for recent payments to load">
+                            <button type="button" class="absolute right-1 top-1/2 -translate-y-1/2 text-gray-400 hover:text-blue-600 p-0.5" id="showPaymentListBtn" title="Recent payments"><i class="fas fa-history text-xs"></i></button>
                         </div>
-                        <div id="paymentList" class="hidden absolute z-[60] mt-1 bg-white border border-gray-200 rounded-lg shadow-xl max-h-56 overflow-y-auto w-[min(100%,34rem)]"></div>
+                        <div id="paymentList" class="hidden absolute z-[60] mt-1 bg-white border border-gray-200 rounded-md shadow-lg max-h-72 overflow-y-auto w-[min(100%,20rem)] left-0 text-[9px] leading-tight"></div>
                     </div>
-                    <div class="relative col-span-3">
-                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter">Date</label>
-                        <span class="absolute inset-y-0 left-0 top-5 pl-2 flex items-center pointer-events-none text-rose-600"><i class="fas fa-calendar-alt text-xs"></i></span>
-                        <input type="datetime-local" name="date_of_transaction" required
-                            class="block w-full pl-7 pr-1 py-1.5 text-[11px] font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-rose-400">
+                    <div class="relative col-span-12 sm:col-span-4 lg:col-span-3">
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Date</label>
+                        <div class="relative">
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-purple-500"><i class="fas fa-calendar-alt text-xs"></i></span>
+                            <input type="datetime-local" name="date_of_transaction" required
+                                class="block w-full pl-7 pr-1 py-1.5 text-[11px] font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-purple-400 focus:border-purple-400 compact-input">
+                        </div>
                     </div>
-                    <div class="relative col-span-6">
-                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 flex items-center justify-between uppercase tracking-tighter">
-                            <span>Party (supplier / vendor)</span>
-                            <button type="button" id="addNewPartyBtn" class="text-rose-600 hover:text-rose-800 font-bold transition-all text-[9px] flex items-center uppercase tracking-tighter">
-                                <i class="fas fa-plus-circle mr-1 text-[10px]"></i> New
+                    <div class="relative col-span-12 sm:col-span-4 lg:col-span-6">
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 flex items-center justify-between uppercase tracking-tighter compact-label">
+                            <span>Party Name</span>
+                            <button type="button" id="addNewPartyBtn" class="text-blue-600 hover:text-blue-800 font-bold transition-all text-[9px] flex items-center uppercase tracking-tighter">
+                                <i class="fas fa-plus-circle mr-1 text-[10px]"></i> Add New
                             </button>
                         </label>
                         <div class="relative">
-                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-rose-500"><i class="fas fa-user text-xs"></i></span>
-                            <input type="text" name="party_name" id="partyNameInput" required autocomplete="off" placeholder="Select party"
-                                class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-rose-400 compact-input">
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-blue-500"><i class="fas fa-user text-xs"></i></span>
+                            <input type="text" name="party_name" id="partyNameInput" required autocomplete="off" spellcheck="false" placeholder="Select Party"
+                                class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-blue-400 focus:border-blue-400 compact-input">
                         </div>
-                        <div id="partyList" class="hidden absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-72 overflow-y-auto"></div>
+                        <div id="partyList" class="hidden absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto"></div>
                     </div>
                 </div>
 
                 <div id="partyInfoSection" class="hidden px-2 pb-1">
-                    <div class="bg-slate-50/90 border border-slate-200 rounded-md px-2 py-1.5 text-xs" id="partyInfoAlert"></div>
+                    <div class="bg-blue-50 border border-blue-200 rounded-lg p-2 text-xs" id="partyInfoAlert"></div>
                 </div>
 
-                <div class="bg-rose-100/60 px-3 py-1 border-t border-b border-rose-100">
-                    <h3 class="text-xs font-bold text-rose-900 flex items-center">
-                        <i class="fas fa-money-bill-wave mr-1.5 text-xs"></i> Payment details
+                <div class="bg-emerald-50 px-3 py-1 border-t border-b border-emerald-100">
+                    <h3 class="text-xs font-bold text-emerald-800 flex items-center">
+                        <i class="fas fa-money-bill-wave mr-1.5 text-xs"></i> Payment Details
                     </h3>
                 </div>
-                <div class="p-2 grid grid-cols-12 gap-1.5">
-                    <div class="col-span-4 relative">
-                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter">Amount (₹)</label>
-                        <span class="absolute inset-y-0 left-0 top-5 pl-2 flex items-center pointer-events-none text-rose-500"><i class="fas fa-wallet text-xs"></i></span>
-                        <input type="number" step="0.01" name="payment_amount" id="paymentAmount" required placeholder="0.00"
-                            class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-rose-400 compact-input">
+                <div class="pr-form-section pr-form-grid">
+                    <div class="relative col-span-12 sm:col-span-4">
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Amount (₹)</label>
+                        <div class="relative">
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-indigo-500"><i class="fas fa-wallet text-xs"></i></span>
+                            <input type="number" step="0.01" name="payment_amount" id="paymentAmount" required placeholder="0.00"
+                                class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400 compact-input">
+                        </div>
                     </div>
-                    <div class="col-span-4 relative">
-                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter">Method</label>
-                        <span class="absolute inset-y-0 left-0 top-5 pl-2 flex items-center pointer-events-none text-gray-500"><i class="fas fa-credit-card text-xs"></i></span>
-                        <select name="payment_method" required
-                            class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-gray-400 compact-input">
-                            <option value="">Select</option>
-                            <option value="Cash">Cash</option>
-                            <option value="Bank">Bank</option>
-                            <option value="UPI">UPI</option>
-                            <option value="Cheque">Cheque</option>
-                            <option value="Card">Card</option>
-                        </select>
+                    <div class="relative col-span-12 sm:col-span-4">
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Mode</label>
+                        <div class="relative">
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-gray-600"><i class="fas fa-credit-card text-xs"></i></span>
+                            <select name="payment_method" required
+                                class="block w-full pl-7 pr-1 py-1.5 text-[11px] font-semibold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-gray-400 focus:border-gray-400 compact-input">
+                                <option value="">Select</option>
+                                <option value="Cash">Cash</option>
+                                <option value="Bank">Bank</option>
+                                <option value="UPI">UPI</option>
+                                <option value="Cheque">Cheque</option>
+                                <option value="Card">Card</option>
+                            </select>
+                        </div>
                     </div>
-                    <div class="col-span-4 relative">
-                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter">Type</label>
-                        <span class="absolute inset-y-0 left-0 top-5 pl-2 flex items-center pointer-events-none text-gray-500"><i class="fas fa-tag text-xs"></i></span>
-                        <select name="payment_type" id="paymentCategorySelect" required
-                            class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-gray-400 compact-input"
-                            title="Category for reports. All types update party balance the same way for the Method you choose (cash vs bank leg).">
-                            <option value="">Select</option>
-                            <option value="Payment_Sent">Payment sent</option>
-                            <option value="Supplier_Payment">Supplier payment</option>
-                            <option value="Vendor_Payment">Vendor payment</option>
-                            <option value="Refund_Payment">Refund</option>
-                            <option value="Advance_Payment">Advance</option>
-                            <option value="Commission_Payment">Commission</option>
-                        </select>
+                    <div class="relative col-span-12 sm:col-span-4">
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Type</label>
+                        <div class="relative">
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-gray-600"><i class="fas fa-tag text-xs"></i></span>
+                            <select name="payment_type" id="paymentCategorySelect" required
+                                class="block w-full pl-7 pr-1 py-1.5 text-[11px] font-semibold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-gray-400 focus:border-gray-400 compact-input"
+                                title="Category for reports. All types update party balance the same way for the Method you choose.">
+                                <option value="">Select</option>
+                                <option value="Payment_Sent">Payment sent</option>
+                                <option value="Supplier_Payment">Supplier payment</option>
+                                <option value="Vendor_Payment">Vendor payment</option>
+                                <option value="Refund_Payment">Refund</option>
+                                <option value="Advance_Payment">Advance</option>
+                                <option value="Commission_Payment">Commission</option>
+                            </select>
+                        </div>
                     </div>
-                    <p id="paymentTypeHint" class="col-span-12 text-[8px] text-slate-600 leading-snug min-h-[2.25rem]"></p>
-                    <div class="col-span-12 relative">
-                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter">Narration</label>
-                        <textarea name="narration" rows="2" placeholder="Optional notes…"
-                            class="block w-full px-2 py-1.5 text-xs border border-gray-200 rounded focus:ring-1 focus:ring-rose-400 compact-input"></textarea>
+                    <div class="relative col-span-12">
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Narration</label>
+                        <div class="relative">
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-purple-500"><i class="fas fa-comment-alt text-xs"></i></span>
+                            <input type="text" name="narration" placeholder="Optional notes..."
+                                class="block w-full pl-7 pr-2 py-1.5 text-xs font-semibold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-purple-400 focus:border-purple-400 compact-input">
+                        </div>
                     </div>
                 </div>
 
-                <div class="bg-gray-50 px-3 py-2 border-t border-gray-200 flex items-center gap-2 justify-end flex-wrap">
-                    <button type="button" id="resetFormBtn"
-                        class="px-3 py-1.5 bg-white border border-gray-300 text-gray-700 text-xs font-bold rounded hover:bg-gray-50 shadow-sm"
-                        title="Reset"><i class="fas fa-undo"></i></button>
-                    <button type="button" id="deleteEditedPaymentBtn"
-                        class="hidden px-3 py-1.5 bg-white border border-red-300 text-red-700 text-xs font-bold rounded hover:bg-red-50 shadow-sm"
-                        title="Delete"><i class="fas fa-trash mr-1"></i>Delete</button>
+                <div class="pr-form-footer">
                     <button type="submit" id="sendPaymentBtn"
-                        class="px-5 py-1.5 bg-rose-600 text-white text-xs font-bold rounded hover:bg-rose-700 shadow-sm">
-                        <i class="fas fa-paper-plane mr-1"></i>Send payment
+                        class="min-w-[7rem] bg-gradient-to-r from-blue-600 to-blue-700 text-white text-[10px] font-bold uppercase py-1.5 px-4 rounded shadow hover:from-blue-700 hover:to-blue-800 transition tracking-tighter">
+                        <i class="fas fa-paper-plane mr-1"></i><span id="sendPaymentBtnText">Send payment</span>
                     </button>
+                    <button type="button" id="deleteEditedPaymentBtn"
+                        class="hidden px-2.5 py-1.5 bg-gradient-to-r from-red-600 to-red-700 text-white text-[10px] font-bold rounded hover:from-red-700 hover:to-red-800 shadow-sm"
+                        title="Delete"><i class="fas fa-trash-alt"></i></button>
+                    <button type="button" id="resetFormBtn"
+                        class="px-2.5 py-1.5 bg-white border border-gray-300 text-gray-700 text-[10px] font-bold rounded hover:bg-gray-50 shadow-sm"
+                        title="Reset"><i class="fas fa-undo"></i></button>
                 </div>
             </form>
         </div>
 
-        <div class="bg-white rounded-lg shadow-md border border-gray-200 overflow-hidden" style="flex: 0 0 45%;">
-            <div class="bg-rose-50 px-3 py-1.5 border-b border-rose-100 rounded-t-lg">
-                <h2 class="text-xs font-bold text-rose-900 flex items-center">
-                    <i class="fas fa-list mr-1.5 text-xs"></i> Recent payments sent
-                </h2>
+        <div class="bg-white rounded-lg shadow-md border border-gray-200 min-w-0 lg:flex-[1_1_45%] self-start w-full">
+            <div class="bg-blue-50 px-3 py-1.5 border-b border-blue-100 rounded-t-lg">
+                <div class="flex items-center justify-between gap-2">
+                    <h2 class="text-xs font-bold text-blue-800 flex items-center">
+                        <i class="fas fa-list mr-1.5 text-xs"></i> Recent Payments Sent
+                    </h2>
+                    <form method="GET" action="" id="dateRangeForm" class="flex items-center gap-1.5">
+                        <input type="date" name="start_date" id="startDate"
+                            value="<?= htmlspecialchars($start_date) ?>"
+                            class="px-1.5 py-0.5 border border-gray-200 rounded text-[10px] w-24 focus:ring-1 focus:ring-blue-400 focus:border-blue-400 bg-white font-medium"
+                            max="<?= date('Y-m-d') ?>" title="From Date">
+                        <span class="text-gray-400 text-[10px] font-bold">to</span>
+                        <input type="date" name="end_date" id="endDate" value="<?= htmlspecialchars($end_date) ?>"
+                            class="px-1.5 py-0.5 border border-gray-200 rounded text-[10px] w-24 focus:ring-1 focus:ring-blue-400 focus:border-blue-400 bg-white font-medium"
+                            max="<?= date('Y-m-d') ?>" title="To Date">
+                        <button type="submit"
+                            class="px-1.5 py-0.5 bg-blue-600 text-white text-[10px] font-bold rounded hover:bg-blue-700 transition shadow-sm"
+                            title="Apply Date Filter">
+                            <i class="fas fa-filter text-[10px]"></i>
+                        </button>
+                    </form>
+                </div>
             </div>
-            <div class="p-2 max-w-full">
-                <div class="overflow-x-auto max-w-full">
-                    <table class="w-full text-sm responsive-table">
-                        <thead>
-                            <tr class="bg-gray-50 border-b">
-                                <th class="text-left py-2 px-1 font-medium text-gray-700 text-sm" style="width: 25%;">Payment & date</th>
-                                <th class="text-left py-2 px-1 font-medium text-gray-700 text-sm" style="width: 25%;">Party</th>
-                                <th class="text-left py-2 px-1 font-medium text-gray-700 text-sm" style="width: 22%;">Amount & method</th>
-                                <th class="text-left py-2 px-1 font-medium text-gray-700 text-sm" style="width: 18%;">Type</th>
-                                <th class="text-left py-2 px-1 font-medium text-gray-700 text-sm" style="width: 10%;">Actions</th>
+            <div class="p-2">
+                <div class="ge-txn-scroll" id="psTxnScroll">
+                    <table class="w-full text-sm text-left text-gray-500 ge-txn-table">
+                        <thead class="bg-slate-50 border-b border-slate-100">
+                            <tr>
+                                <th class="py-2 px-1 text-center text-[9px] font-bold text-slate-500 ge-serial-col">#</th>
+                                <th class="py-2 px-2 text-left text-[9px] font-bold text-slate-500 w-16">Id</th>
+                                <th class="py-2 px-2 text-left text-[9px] font-bold text-slate-500 ge-party-col">Party</th>
+                                <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500">Amount</th>
+                                <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500">Method</th>
+                                <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500 ge-action-col">Action</th>
                             </tr>
                         </thead>
-                        <tbody>
-                            <?php if ($transactions && $transactions->num_rows > 0):
-                            foreach ($transactions as $t):
-                            $out_disp = payment_send_list_display_id($t);
-                            $pl = payment_send_party_display_lines($t);
+                        <tbody class="divide-y divide-gray-100">
+                            <?php if (count($transactions_list) > 0):
+                            foreach ($transactions_list as $index => $t):
+                                $serial = $index + 1;
+                                $out_disp = payment_send_list_display_id($t);
+                                $pl = payment_send_party_display_lines($t);
+                                $is_bank = strcasecmp(trim((string)($t['payment_method'] ?? 'Cash')), 'Cash') !== 0;
+                                $cat_label = payment_send_category_label($t['booking_type'] ?? null);
                             ?>
-                                <tr class="border-b hover:bg-gray-50">
-                                    <td class="py-2 px-1">
-                                        <div class="flex items-center">
-                                            <span class="bg-rose-600 text-white text-xs px-1.5 py-0.5 rounded-full mr-1 font-bold">OUT</span>
-                                            <div>
-                                                <div class="font-mono text-sm font-bold text-gray-900" title="<?= htmlspecialchars($t['receipt_id']) ?>"><?= htmlspecialchars($out_disp) ?></div>
-                                                <div class="text-xs text-gray-500"><?= date('d M Y', strtotime($t['date_of_transaction'])) ?></div>
-                                            </div>
-                                        </div>
-                                    </td>
-                                    <td class="py-2 px-1">
-                                        <div class="font-semibold text-gray-900 text-sm leading-tight"><?= htmlspecialchars($pl['name']) ?></div>
-                                        <div class="text-[11px] text-gray-500"><?= htmlspecialchars($pl['sub']) ?></div>
-                                    </td>
-                                    <td class="py-2 px-1">
-                                        <div class="text-sm font-bold text-rose-700">₹<?= number_format($t['payment_amount'], 2) ?></div>
-                                        <div class="text-xs text-gray-500"><?= htmlspecialchars($t['payment_method']) ?></div>
-                                    </td>
-                                    <td class="py-2 px-1">
-                                        <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-rose-50 text-rose-800">
-                                            <?= htmlspecialchars(payment_send_category_label($t['booking_type'] ?? null)) ?>
-                                        </span>
-                                    </td>
-                                    <td class="py-2 px-1">
-                                        <div class="flex items-center space-x-1">
-                                            <button type="button" class="edit-send-btn text-blue-600 hover:text-blue-800" title="Edit" data-id="<?= (int)$t['id'] ?>">
-                                                <i class="fas fa-edit text-xs"></i>
-                                            </button>
-                                            <button type="button" class="print-send-btn text-blue-600 hover:text-blue-800" title="Print" data-id="<?= (int)$t['id'] ?>">
-                                                <i class="fas fa-print text-xs"></i>
-                                            </button>
-                                            <button type="button" class="delete-send-btn text-red-600 hover:text-red-800" title="Delete" data-id="<?= (int)$t['id'] ?>"
-                                                data-receipt-id="<?= htmlspecialchars($t['receipt_id']) ?>" data-display-id="<?= htmlspecialchars($out_disp) ?>" data-amount="<?= htmlspecialchars((string)$t['payment_amount']) ?>">
-                                                <i class="fas fa-trash text-xs"></i>
-                                            </button>
-                                        </div>
-                                    </td>
-                                </tr>
-                            <?php endforeach; else: ?>
-                                <tr>
-                                    <td colspan="5" class="text-center py-8 text-gray-500">
-                                        <i class="fas fa-inbox text-2xl mb-2"></i><br>
-                                        No payments sent yet
-                                    </td>
-                                </tr>
+                            <tr class="ge-txn-row hover:bg-slate-50 transition-colors border-b border-slate-100 last:border-b-0">
+                                <td class="py-1.5 px-1 align-top text-center ge-serial-col">
+                                    <span class="text-[9px] font-bold text-slate-400 tabular-nums"><?= $serial ?></span>
+                                </td>
+                                <td class="py-1.5 px-2 align-top group">
+                                    <div class="text-[10px] font-bold text-blue-600 group-hover:underline truncate flex items-center gap-0.5">
+                                        <span class="truncate">#<?= htmlspecialchars($out_disp) ?></span>
+                                        <?php if ($is_bank): ?>
+                                            <i class="fas fa-university text-indigo-600 text-[9px] shrink-0" title="Bank"></i>
+                                        <?php else: ?>
+                                            <i class="fas fa-wallet text-emerald-600 text-[9px] shrink-0" title="Cash"></i>
+                                        <?php endif; ?>
+                                    </div>
+                                    <div class="text-[8px] font-semibold text-slate-400 leading-tight tabular-nums whitespace-nowrap">
+                                        <?= date('d M', strtotime($t['date_of_transaction'])) ?> · <?= date('h:i A', strtotime($t['date_of_transaction'])) ?>
+                                    </div>
+                                </td>
+                                <td class="py-1.5 px-2 align-top ge-party-col">
+                                    <div class="text-[10px] font-semibold text-slate-800 truncate uppercase" title="<?= htmlspecialchars($pl['name']) ?>">
+                                        <?= htmlspecialchars($pl['name']) ?>
+                                    </div>
+                                    <div class="text-[8px] font-medium text-slate-400 truncate"><?= htmlspecialchars($pl['sub']) ?></div>
+                                </td>
+                                <td class="py-1.5 px-2 align-top text-right">
+                                    <div class="text-[10px] font-bold text-slate-800 leading-none">₹<?= ps_format_inr($t['payment_amount']) ?></div>
+                                    <div class="mt-1">
+                                        <span class="text-[7.5px] px-1 py-0.5 rounded bg-rose-100 text-rose-700 font-bold uppercase tracking-tighter"><?= htmlspecialchars($cat_label) ?></span>
+                                    </div>
+                                </td>
+                                <td class="py-1.5 px-2 align-top text-right">
+                                    <div class="text-[10px] font-semibold text-slate-700 leading-none"><?= htmlspecialchars($t['payment_method'] ?? '—') ?></div>
+                                </td>
+                                <td class="py-1.5 px-2 align-top ge-action-col whitespace-nowrap">
+                                    <div class="flex items-center justify-end gap-0.5">
+                                        <button type="button" class="ge-action-btn edit-send-btn text-blue-500 hover:text-blue-700" title="Edit" data-id="<?= (int)$t['id'] ?>">
+                                            <i class="fas fa-edit"></i>
+                                        </button>
+                                        <button type="button" class="ge-action-btn print-send-btn text-emerald-600 hover:text-emerald-800" title="Print" data-id="<?= (int)$t['id'] ?>">
+                                            <i class="fas fa-print"></i>
+                                        </button>
+                                        <button type="button" class="ge-action-btn delete-send-btn text-red-500 hover:text-red-700" title="Delete"
+                                            data-id="<?= (int)$t['id'] ?>"
+                                            data-receipt-id="<?= htmlspecialchars($t['receipt_id']) ?>"
+                                            data-display-id="<?= htmlspecialchars($out_disp) ?>"
+                                            data-amount="<?= $t['payment_amount'] ?>">
+                                            <i class="fas fa-trash"></i>
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            <?php endforeach;
+                            else: ?>
+                            <tr>
+                                <td colspan="6" class="text-center py-8 text-gray-500">
+                                    <i class="fas fa-inbox text-2xl mb-2"></i><br>
+                                    No payments sent yet
+                                </td>
+                            </tr>
                             <?php endif; ?>
                         </tbody>
                     </table>
                 </div>
-                <?php if ($total_pages > 1): ?>
-                <div class="mt-4 flex justify-center">
-                    <nav class="flex space-x-1">
-                        <?php for ($i = 1; $i <= $total_pages; $i++): ?>
-                            <a href="?page=<?= $i ?><?= isset($_GET['search']) ? '&search=' . htmlspecialchars($_GET['search']) : '' ?>"
-                               class="px-3 py-2 text-sm border border-gray-300 rounded-lg <?= $i == $page ? 'bg-rose-600 text-white border-rose-600' : 'text-gray-700 hover:bg-gray-50' ?>">
-                                <?= $i ?>
-                            </a>
-                        <?php endfor; ?>
-                    </nav>
-                </div>
+                <?php if ($payment_list_has_more): ?>
+                <p class="text-[9px] text-slate-400 text-center mt-1">Showing first <?= count($transactions_list) ?> of <?= $total_transactions ?> — narrow the date range to see more</p>
                 <?php endif; ?>
             </div>
         </div>
@@ -921,21 +1076,24 @@ if ($total_result && $transactions) {
 <script>
 (function () {
     $(document).ready(function () {
+        var psSaveBtnClass = 'min-w-[7rem] bg-gradient-to-r from-blue-600 to-blue-700 text-white text-[10px] font-bold uppercase py-1.5 px-4 rounded shadow hover:from-blue-700 hover:to-blue-800 transition tracking-tighter';
+
         function refreshPaymentTypeHint() {
             var v = ($('#paymentCategorySelect').val() || $('[name="payment_type"]').val() || '');
             var hints = {
-                '': '',
-                'Payment_Sent': 'General payment to the party. Same cash/bank ledger effect as other types; use for statements or mixed dues. E.g. pay ₹50,000 on what you owe.',
-                'Supplier_Payment': 'Tag payments tied to goods from a supplier. E.g. settle ₹2,00,000 after a gold purchase bill. Reduces payable on the leg you pick (Cash or Bank).',
-                'Vendor_Payment': 'Tag payments for services or other vendors (rent, transport, etc.). Ledger movement matches Method; label helps reports.',
-                'Refund_Payment': 'Money you return to the party (e.g. cancelled deal, deposit refund). Still recorded as payment out; reduces their net receivable from you.',
-                'Advance_Payment': 'Pay before purchase/service. E.g. ₹1,00,000 advance to reserve stock. Same balance rules; label marks prepayments in history.',
-                'Commission_Payment': 'Brokerage or commission paid to the party. Cash method updates party cash_balance; Bank/UPI/Cheque/Card updates bank_balance — same as other payment types.'
+                'Payment_Sent': 'General payment to the party.',
+                'Supplier_Payment': 'Tag payments tied to goods from a supplier.',
+                'Vendor_Payment': 'Tag payments for services or other vendors.',
+                'Refund_Payment': 'Money you return to the party.',
+                'Advance_Payment': 'Pay before purchase/service.',
+                'Commission_Payment': 'Brokerage or commission paid to the party.'
             };
-            $('#paymentTypeHint').text(hints[v] || '');
+            var hint = hints[v] || '';
+            $('#paymentCategorySelect').attr('title', hint || 'Category for reports. All types update party balance the same way for the Method you choose.');
         }
 
         $('#paymentCategorySelect').on('change', refreshPaymentTypeHint);
+        refreshPaymentTypeHint();
 
         function generatePaymentOutId() {
             return new Promise(function (resolve) {
@@ -1066,8 +1224,8 @@ if ($total_result && $transactions) {
                     $pt.val('Payment_Sent');
                 }
                 refreshPaymentTypeHint();
-                $('#sendPaymentBtn').html('<i class="fas fa-save mr-1"></i>Update payment').attr('class', 'px-5 py-1.5 bg-orange-600 text-white text-xs font-bold rounded hover:bg-orange-700 shadow-sm');
-                $('#paymentOutForm').closest('.bg-white').css('border', '2px solid #f97316');
+                $('#sendPaymentBtn').html('<i class="fas fa-paper-plane mr-1"></i><span>Update payment</span>').attr('class', psSaveBtnClass);
+                $('#paymentOutFormCard').css('border', '2px solid #f97316');
                 $('#deleteEditedPaymentBtn').removeClass('hidden');
                 if (pid > 0) {
                     $.post('', { action: 'get_party_info', party_id: pid }, function (response) {
@@ -1086,6 +1244,11 @@ if ($total_result && $transactions) {
         $(document).on('click', function (e) {
             if (!$(e.target).closest('#paymentList, #showPaymentListBtn, #paymentIdInput').length) {
                 $('#paymentList').addClass('hidden');
+            }
+            if (!$(e.target).closest('#partyNameInput, #partyList, #addNewPartyBtn').length && partyListVisible) {
+                $('#partyList').addClass('hidden');
+                partyListVisible = false;
+                currentIndex = -1;
             }
         });
 
@@ -1140,15 +1303,42 @@ if ($total_result && $transactions) {
             showAddPartyModal(($('#partyNameInput').val() || '').trim(), null);
         });
 
+        function escPartyHtml(t) {
+            return String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+        }
+
+        function appendCreatePartyRow(partyListEl, searchTerm) {
+            var term = (searchTerm || '').trim();
+            if (!term) return;
+            var row = document.createElement('div');
+            row.className = 'px-3 py-2 hover:bg-green-50 cursor-pointer transition-colors party-item bg-green-50 border-t-2 border-green-200';
+            row.setAttribute('data-create-new', '1');
+            row.innerHTML = '<div class="flex items-center gap-2"><i class="fas fa-plus-circle text-green-600"></i>' +
+                '<div class="font-semibold text-[11px] text-green-700">Create new party &quot;' + escPartyHtml(term) + '&quot;</div></div>';
+            row.addEventListener('mousedown', function (e) { e.preventDefault(); });
+            row.addEventListener('click', function (e) {
+                e.stopPropagation();
+                $('#partyList').addClass('hidden');
+                partyListVisible = false;
+                currentIndex = -1;
+                showAddPartyModal(term, null);
+            });
+            partyListEl.appendChild(row);
+        }
+
         function updatePartyHighlight() {
-            var partyItems = document.querySelectorAll('#partyList .party-option');
+            var partyItems = document.querySelectorAll('#partyList .party-item');
             partyItems.forEach(function (item, index) {
                 if (index === currentIndex && currentIndex >= 0) {
-                    item.classList.add('bg-rose-100', 'border-l-4', 'border-rose-500');
-                    item.classList.remove('hover:bg-rose-50');
+                    item.classList.add('bg-yellow-100', 'border-l-4', 'border-amber-400');
+                    item.classList.remove('hover:bg-yellow-50', 'hover:bg-green-50', 'bg-green-50');
                 } else {
-                    item.classList.remove('bg-rose-100', 'border-l-4', 'border-rose-500');
-                    item.classList.add('hover:bg-rose-50');
+                    item.classList.remove('bg-yellow-100', 'border-l-4', 'border-amber-400');
+                    if (item.getAttribute('data-create-new')) {
+                        item.classList.add('hover:bg-green-50', 'bg-green-50');
+                    } else {
+                        item.classList.add('hover:bg-yellow-50');
+                    }
                 }
             });
             if (currentIndex >= 0 && currentIndex < partyItems.length) {
@@ -1157,7 +1347,7 @@ if ($total_result && $transactions) {
         }
 
         $('#partyNameInput').on('keydown', function (e) {
-            var partyItems = document.querySelectorAll('#partyList .party-option');
+            var partyItems = document.querySelectorAll('#partyList .party-item');
             if (partyListVisible && partyItems.length > 0) {
                 if (e.key === 'ArrowDown') {
                     e.preventDefault();
@@ -1169,7 +1359,7 @@ if ($total_result && $transactions) {
                 if (e.key === 'ArrowUp') {
                     e.preventDefault();
                     e.stopPropagation();
-                    currentIndex = currentIndex <= 0 ? -1 : currentIndex - 1;
+                    currentIndex = currentIndex <= 0 ? -1 : Math.max(currentIndex - 1, 0);
                     updatePartyHighlight();
                     return;
                 }
@@ -1179,6 +1369,10 @@ if ($total_result && $transactions) {
                     var idx = currentIndex >= 0 ? currentIndex : 0;
                     var sel = partyItems[idx];
                     if (sel) {
+                        if (sel.getAttribute('data-create-new')) {
+                            sel.click();
+                            return;
+                        }
                         selectParty({
                             id: sel.getAttribute('data-id'),
                             party_name: sel.getAttribute('data-name')
@@ -1208,6 +1402,7 @@ if ($total_result && $transactions) {
             if (term.length < 1) {
                 $('#partyList').addClass('hidden');
                 partyListVisible = false;
+                currentIndex = -1;
                 $('#partyInfoSection').addClass('hidden');
                 return;
             }
@@ -1216,21 +1411,31 @@ if ($total_result && $transactions) {
                 partyList.empty();
                 currentIndex = -1;
                 if (!parties || parties.length === 0) {
-                    partyList.addClass('hidden');
+                    appendCreatePartyRow(partyList[0], term.trim());
+                    partyList.removeClass('hidden');
+                    partyListVisible = true;
                     return;
                 }
                 parties.forEach(function (party, index) {
-                    var bal = parseFloat(party.current_balance != null ? party.current_balance : (parseFloat(party.cash_balance) + parseFloat(party.bank_balance))) || 0;
+                    var cb = parseFloat(party.cash_balance) || 0;
+                    var bb = parseFloat(party.bank_balance) || 0;
+                    var totalRaw = parseFloat(party.total_due_amount);
+                    var ledger = !isNaN(totalRaw) ? totalRaw : (cb + bb);
+                    var pname = escPartyHtml(party.party_name || '');
+                    var addr = escPartyHtml((party.address || '').trim() || 'No address');
                     var partyItem = document.createElement('div');
-                    partyItem.className = 'px-3 py-2 hover:bg-rose-50 cursor-pointer border-b border-gray-100 party-option';
+                    partyItem.className = 'px-3 py-2 hover:bg-yellow-50 cursor-pointer border-b border-gray-100 last:border-b-0 transition-colors party-item';
                     partyItem.setAttribute('data-index', String(index));
-                    partyItem.setAttribute('data-id', party.id);
+                    partyItem.setAttribute('data-id', party.id || '');
                     partyItem.setAttribute('data-name', party.party_name || '');
-                    partyItem.innerHTML = '<div class="flex justify-between gap-2"><div class="font-bold text-[11px] text-slate-800">' + (party.party_name || '') + '</div>' +
-                        '<div class="text-[10px] text-rose-600 font-bold">₹' + bal.toLocaleString('en-IN') + '</div></div>';
-                    partyItem.addEventListener('mousedown', function (ev) {
-                        ev.preventDefault();
-                    });
+                    partyItem.innerHTML =
+                        '<div class="flex justify-between items-start gap-2">' +
+                        '<div class="font-bold text-[11px] text-slate-800 uppercase tracking-tight leading-tight">' + pname + '</div>' +
+                        '<div class="text-[10px] text-slate-400 font-medium truncate max-w-[130px] text-right">' + addr + '</div></div>' +
+                        '<div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1">' +
+                        '<div class="text-[10px] text-rose-600 font-bold tracking-tight"><i class="fas fa-wallet mr-1 opacity-70"></i>₹' + ledger.toLocaleString('en-IN') + '</div>' +
+                        '<div class="text-[9px] text-slate-500 font-semibold">C ₹' + cb.toLocaleString('en-IN') + ' · B ₹' + bb.toLocaleString('en-IN') + '</div></div>';
+                    partyItem.addEventListener('mousedown', function (ev) { ev.preventDefault(); });
                     partyItem.addEventListener('click', function (ev) {
                         ev.stopPropagation();
                         selectParty({
@@ -1240,6 +1445,7 @@ if ($total_result && $transactions) {
                     });
                     partyList[0].appendChild(partyItem);
                 });
+                appendCreatePartyRow(partyList[0], term.trim());
                 partyList.removeClass('hidden');
                 partyListVisible = true;
             }, 'json');
@@ -1305,13 +1511,13 @@ if ($total_result && $transactions) {
             $('[name="payment_amount"]').val('');
             $('[name="payment_method"]').val('');
             $('[name="payment_type"]').val('');
-            $('#paymentTypeHint').text('');
+            refreshPaymentTypeHint();
             $('[name="narration"]').val('');
             $('#editTransactionId').val('');
             $('#editModeIndicator').addClass('hidden');
             $('#deleteEditedPaymentBtn').addClass('hidden');
-            $('#paymentOutForm').closest('.bg-white').css('border', '');
-            $('#sendPaymentBtn').html('<i class="fas fa-paper-plane mr-1"></i>Send payment').attr('class', 'px-5 py-1.5 bg-rose-600 text-white text-xs font-bold rounded hover:bg-rose-700 shadow-sm');
+            $('#paymentOutFormCard').css('border', '');
+            $('#sendPaymentBtn').html('<i class="fas fa-paper-plane mr-1"></i><span>Send payment</span>').attr('class', psSaveBtnClass);
             initializeForm().then(function () { $('#partyNameInput').focus(); });
         }
 
@@ -1355,7 +1561,7 @@ if ($total_result && $transactions) {
 
         $(document).on('click', '.edit-send-btn', function () {
             loadPaymentForEdit($(this).data('id'));
-            $('html, body').animate({ scrollTop: $('#paymentOutForm').offset().top - 80 }, 400);
+            $('html, body').animate({ scrollTop: $('#paymentOutFormCard').offset().top - 80 }, 400);
         });
 
         $(document).on('click', '.print-send-btn', function () {
@@ -1433,6 +1639,26 @@ if ($total_result && $transactions) {
         if ($(window).width() >= 992) {
             setTimeout(function () { $('#partyNameInput').focus(); }, 400);
         }
+
+        $('#startDate, #endDate').on('change', function () {
+            var startDate = new Date($('#startDate').val());
+            var endDate = new Date($('#endDate').val());
+            if (startDate > endDate) {
+                Swal.fire({
+                    icon: 'warning',
+                    title: 'Invalid Date Range',
+                    text: 'End date must be greater than or equal to start date',
+                    confirmButtonColor: '#3085d6',
+                    timer: 2000,
+                    showConfirmButton: false
+                });
+                if ($(this).attr('id') === 'startDate') {
+                    $('#endDate').val($('#startDate').val());
+                } else {
+                    $('#startDate').val($('#endDate').val());
+                }
+            }
+        });
     });
 })();
 </script>

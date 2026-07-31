@@ -67,6 +67,24 @@ function payment_receipt_party_display_lines(array $t): array {
     return ['name' => $name, 'sub' => 'No party linked'];
 }
 
+/** Indian-style number grouping for stat/list amounts (matches exchange.php). */
+function pr_format_inr($amount, int $decimals = 0): string
+{
+    $amount = (float) $amount;
+    $negative = $amount < 0;
+    $amount = abs(round($amount, $decimals));
+    $parts = explode('.', number_format($amount, $decimals, '.', ''));
+    $integer = $parts[0];
+    $decimalPart = $decimals > 0 ? ('.' . $parts[1]) : '';
+    $lastThree = substr($integer, -3);
+    $rest = substr($integer, 0, -3);
+    if ($rest !== '') {
+        $lastThree = ',' . $lastThree;
+        $rest = (string) preg_replace('/\B(?=(\d{2})+(?!\d))/', ',', $rest);
+    }
+    return ($negative ? '-' : '') . $rest . $lastThree . $decimalPart;
+}
+
 if ($conn->connect_error) {
     die('Database connection failed: ' . $conn->connect_error . '. Please run setup_database.php first.');
 }
@@ -681,13 +699,16 @@ if ($balance_result && ($br = $balance_result->fetch_assoc())) {
     $stats['bank_balance'] = (float) ($br['bank_balance'] ?? 0);
 }
 
-// Get recent payment transactions
-$page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
-$limit = 10;
-$offset = ($page - 1) * $limit;
+// Get recent payment transactions (date range + scroll list, same pattern as exchange.php)
+$start_date = isset($_GET['start_date']) && !empty($_GET['start_date']) ? $_GET['start_date'] : date('Y-m-d');
+$end_date = isset($_GET['end_date']) && !empty($_GET['end_date']) ? $_GET['end_date'] : date('Y-m-d');
+$payment_list_limit = 100;
 
 $search = isset($_GET['search']) ? $conn->real_escape_string($_GET['search']) : '';
-$where_clause = $search ? "AND (p.party_name LIKE '%$search%' OR t.receipt_id LIKE '%$search%')" : '';
+$where_clause = "AND DATE(t.date_of_transaction) BETWEEN '$start_date' AND '$end_date'";
+if ($search) {
+    $where_clause .= " AND (p.party_name LIKE '%$search%' OR t.receipt_id LIKE '%$search%')";
+}
 
 $transactions_sql = "SELECT t.*, p.party_name, p.contact_no AS party_contact 
                     FROM transactions t 
@@ -697,11 +718,11 @@ $transactions_sql = "SELECT t.*, p.party_name, p.contact_no AS party_contact
                     AND t.company_id = $company_id
                     $where_clause 
                     ORDER BY t.date_of_transaction DESC, t.id DESC 
-                    LIMIT $offset, $limit";
+                    LIMIT $payment_list_limit";
 
 $transactions = $conn->query($transactions_sql);
+$transactions_list = ($transactions && $transactions->num_rows > 0) ? $transactions->fetch_all(MYSQLI_ASSOC) : [];
 
-// Count the total number of Payment transactions
 $total_sql = "SELECT COUNT(*) as count 
               FROM transactions t 
               LEFT JOIN parties p ON t.party_id = p.id
@@ -710,15 +731,8 @@ $total_sql = "SELECT COUNT(*) as count
               AND t.company_id = $company_id
               $where_clause";
 $total_result = $conn->query($total_sql);
-
-if ($total_result && $transactions) {
-    $total_transactions = $total_result->fetch_assoc()['count'];
-    $total_pages = ceil($total_transactions / $limit);
-} else {
-    $total_transactions = 0;
-    $total_pages = 0;
-    $transactions = false;
-}
+$total_transactions = ($total_result) ? (int) $total_result->fetch_assoc()['count'] : 0;
+$payment_list_has_more = $total_transactions > count($transactions_list);
 ?>
 
 <!-- Page-specific styles (page body comes from components/layout.php) -->
@@ -898,11 +912,21 @@ if ($total_result && $transactions) {
                 padding: 0.375rem 0.25rem !important;
             }
         }
-    /* Validation error styles */
+    /* Validation error — overlay below field, no layout shift */
     .validation-error {
-        display: block;
-        min-height: 1.25rem;
-        line-height: 1.25rem;
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 100%;
+        z-index: 40;
+        font-size: 9px;
+        line-height: 1.15;
+        color: #dc2626;
+        margin-top: 1px;
+        pointer-events: none;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
 
     .validation-error.hidden {
@@ -953,242 +977,364 @@ if ($total_result && $transactions) {
             align-items: center;
             justify-content: center;
         }
-        .soft-gradient-green { background: linear-gradient(135deg, rgba(34, 197, 94, 0.1), rgba(34, 197, 94, 0.05)); }
-        .soft-gradient-blue { background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(59, 130, 246, 0.05)); }
-        .soft-gradient-purple { background: linear-gradient(135deg, rgba(168, 85, 247, 0.1), rgba(168, 85, 247, 0.05)); }
-        .soft-gradient-teal { background: linear-gradient(135deg, rgba(20, 184, 166, 0.1), rgba(20, 184, 166, 0.05)); }
-        .soft-gradient-orange { background: linear-gradient(135deg, rgba(249, 115, 22, 0.1), rgba(249, 115, 22, 0.05)); }
-        .soft-gradient-rose { background: linear-gradient(135deg, rgba(244, 63, 94, 0.09), rgba(244, 63, 94, 0.03)); }
         .compact-input { padding-top: 0.375rem !important; padding-bottom: 0.375rem !important; font-size: 0.75rem !important; }
+        .compact-label { font-size: 0.65rem !important; margin-bottom: 0.1rem !important; }
+
+        #partyList {
+            position: absolute !important;
+            top: 100% !important;
+            left: 0 !important;
+            right: 0 !important;
+            width: 100% !important;
+            z-index: 1000 !important;
+        }
+
+        .ge-action-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 1.4rem;
+            height: 1.4rem;
+            border-radius: 0.25rem;
+            flex-shrink: 0;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            padding: 0;
+        }
+        .ge-action-btn i { font-size: 10px; line-height: 1; pointer-events: none; }
+        .ge-action-btn:hover { background: rgba(148, 163, 184, 0.18); }
+
+        .ge-txn-table .ge-action-col {
+            width: 3.75rem;
+            min-width: 3.75rem;
+            padding-left: 0.2rem !important;
+            padding-right: 0.3rem !important;
+        }
+        .ge-txn-scroll {
+            max-height: calc(100vh - 300px);
+            min-height: 220px;
+            overflow-y: auto;
+            overflow-x: auto;
+        }
+        .ge-txn-scroll thead th {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            background-color: #f8fafc;
+            box-shadow: 0 1px 0 #e2e8f0;
+        }
+        .ge-txn-table thead th { white-space: nowrap; }
+        .ge-txn-table .ge-serial-col {
+            width: 1.75rem;
+            min-width: 1.75rem;
+            padding-left: 0.35rem !important;
+            padding-right: 0.25rem !important;
+            text-align: center;
+        }
+        .ge-txn-table .ge-party-col {
+            width: 5.75rem;
+            max-width: 5.75rem;
+            padding-left: 0.3rem !important;
+            padding-right: 0.3rem !important;
+        }
+        .ge-txn-table td,
+        .ge-txn-table th {
+            padding-left: 0.35rem;
+            padding-right: 0.35rem;
+        }
+        .ge-txn-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+        .ge-txn-scroll::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.5); border-radius: 3px; }
+        .ge-txn-scroll::-webkit-scrollbar-track { background: transparent; }
+
+        /* Compact form — tight rows, aligned field baselines */
+        .pr-form-section { padding: 0.375rem 0.5rem; }
+        .pr-form-grid {
+            display: grid;
+            grid-template-columns: repeat(12, minmax(0, 1fr));
+            gap: 0.375rem;
+            align-items: end;
+        }
+        .pr-form-footer {
+            padding: 0.375rem 0.5rem;
+            border-top: 1px solid #e5e7eb;
+            background: #f9fafb;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 0.25rem;
+        }
     </style>
 
-<div class="w-full px-1 pb-4">
-        <!-- Statistics (compact cards — same family as purchase/sell) -->
-        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2 mb-3">
-            <div class="soft-gradient-green rounded-xl p-2 shadow-sm border border-slate-200/50">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-[9px] font-bold text-emerald-800 uppercase tracking-tighter opacity-80 leading-none mb-0.5">Cash in hand</p>
-                        <p class="text-[13px] font-bold text-emerald-900 leading-none">₹<?= number_format($stats['cash_in_hand'] ?? 0, 0) ?></p>
-                        <p class="text-[9px] text-emerald-700/80">Company</p>
+<div class="w-full min-w-0 px-1 pb-4">
+        <!-- Statistics Cards -->
+        <div class="overflow-x-auto pb-1 -mx-0.5 px-0.5">
+        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2 mb-3 min-w-0 w-full">
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Cash in hand</p>
+                        <p class="stats-card-value leading-tight">₹<?= pr_format_inr($stats['cash_in_hand'] ?? 0) ?></p>
                     </div>
-                    <div class="w-6 h-6 bg-emerald-500 rounded flex items-center justify-center">
-                        <i class="fas fa-wallet text-white text-[9px]"></i>
-                    </div>
-                </div>
-            </div>
-            <div class="soft-gradient-blue rounded-xl p-2 shadow-sm border border-slate-200/50">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-[9px] font-bold text-blue-800 uppercase tracking-tighter opacity-80 leading-none mb-0.5">Bank balance</p>
-                        <p class="text-[13px] font-bold text-blue-900 leading-none">₹<?= number_format($stats['bank_balance'] ?? 0, 0) ?></p>
-                        <p class="text-[9px] text-blue-700/80">Company</p>
-                    </div>
-                    <div class="w-6 h-6 bg-blue-500 rounded flex items-center justify-center">
-                        <i class="fas fa-university text-white text-[9px]"></i>
+                    <div class="stats-icon-wrap bg-emerald-100 shrink-0">
+                        <i class="fas fa-wallet text-emerald-600 text-xs"></i>
                     </div>
                 </div>
             </div>
-            <div class="soft-gradient-purple rounded-xl p-2 shadow-sm border border-slate-200/50">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-[9px] font-bold text-purple-800 uppercase tracking-tighter opacity-80 leading-none mb-0.5">Cash received</p>
-                        <p class="text-[13px] font-bold text-purple-900 leading-none">₹<?= number_format($stats['total_cash_received'] ?? 0, 0) ?></p>
-                        <p class="text-[9px] text-purple-700/80">Today</p>
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Bank balance</p>
+                        <p class="stats-card-value leading-tight">₹<?= pr_format_inr($stats['bank_balance'] ?? 0) ?></p>
                     </div>
-                    <div class="w-6 h-6 bg-purple-500 rounded flex items-center justify-center">
-                        <i class="fas fa-money-bill-wave text-white text-[9px]"></i>
-                    </div>
-                </div>
-            </div>
-            <div class="soft-gradient-teal rounded-xl p-2 shadow-sm border border-slate-200/50">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-[9px] font-bold text-teal-800 uppercase tracking-tighter opacity-80 leading-none mb-0.5">Bank received</p>
-                        <p class="text-[13px] font-bold text-teal-900 leading-none">₹<?= number_format($stats['total_bank_received'] ?? 0, 0) ?></p>
-                        <p class="text-[9px] text-teal-700/80">Today</p>
-                    </div>
-                    <div class="w-6 h-6 bg-teal-500 rounded flex items-center justify-center">
-                        <i class="fas fa-building-columns text-white text-[9px]"></i>
+                    <div class="stats-icon-wrap bg-blue-100 shrink-0">
+                        <i class="fas fa-university text-blue-600 text-xs"></i>
                     </div>
                 </div>
             </div>
-            <div class="soft-gradient-orange rounded-xl p-2 shadow-sm border border-slate-200/50">
-                <div class="flex items-center justify-between">
-                    <div>
-                        <p class="text-[9px] font-bold text-orange-800 uppercase tracking-tighter opacity-80 leading-none mb-0.5">Total outstanding</p>
-                        <p class="text-[13px] font-bold text-orange-900 leading-none">₹<?= number_format($stats['total_outstanding'] ?? 0, 0) ?></p>
-                        <p class="text-[9px] text-orange-700/80">Parties</p>
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Cash received</p>
+                        <p class="stats-card-value leading-tight">₹<?= pr_format_inr($stats['total_cash_received'] ?? 0) ?></p>
                     </div>
-                    <div class="w-6 h-6 bg-orange-500 rounded flex items-center justify-center">
-                        <i class="fas fa-file-invoice-dollar text-white text-[9px]"></i>
+                    <div class="stats-icon-wrap bg-purple-100 shrink-0">
+                        <i class="fas fa-money-bill-wave text-purple-600 text-xs"></i>
+                    </div>
+                </div>
+            </div>
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Bank received</p>
+                        <p class="stats-card-value leading-tight">₹<?= pr_format_inr($stats['total_bank_received'] ?? 0) ?></p>
+                    </div>
+                    <div class="stats-icon-wrap bg-teal-100 shrink-0">
+                        <i class="fas fa-building-columns text-teal-600 text-xs"></i>
+                    </div>
+                </div>
+            </div>
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Outstanding</p>
+                        <p class="stats-card-value leading-tight">₹<?= pr_format_inr($stats['total_outstanding'] ?? 0) ?></p>
+                    </div>
+                    <div class="stats-icon-wrap bg-orange-100 shrink-0">
+                        <i class="fas fa-file-invoice-dollar text-orange-600 text-xs"></i>
                     </div>
                 </div>
             </div>
         </div>
+        </div>
 
-        <!-- Main Form and List Layout -->
-        <div class="flex flex-col lg:flex-row gap-3">
-            <!-- Left — form (grid matches purchase / sell) -->
-            <div class="bg-white rounded-lg shadow-md border border-gray-200 overflow-hidden" style="flex: 0 0 55%;">
+        <!-- Main Content -->
+        <div class="flex flex-col lg:flex-row gap-4 min-w-0 w-full lg:items-start">
+            <!-- Left — Form -->
+            <div class="bg-white rounded-lg shadow-md border border-gray-200 min-w-0 lg:flex-[1_1_55%] overflow-hidden self-start w-full">
                 <form id="paymentForm" method="POST" class="overflow-hidden" onsubmit="return false;">
                         <input type="hidden" name="action" value="save_payment">
                         <input type="hidden" name="party_id" id="partyId">
                         <input type="hidden" id="editTransactionId" value="">
 
-                        <div class="bg-emerald-50 px-3 py-1 border-b border-emerald-100">
-                            <h3 class="text-xs font-bold text-emerald-900 flex items-center">
-                                <i class="fas fa-file-invoice mr-1.5 text-xs"></i> Transaction details
+                        <div class="bg-blue-50 px-3 py-1 border-b border-blue-100">
+                            <h3 class="text-xs font-bold text-blue-800 flex items-center">
+                                <i class="fas fa-file-invoice mr-1.5 text-xs"></i> Transaction Details
+                                <span id="editModeIndicator" class="ml-2 text-orange-600 hidden text-[10px]">(Edit)</span>
                             </h3>
                         </div>
-                        <div class="p-2 grid grid-cols-12 gap-1.5">
-                            <div class="relative col-span-3">
-                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter">Receipt ID <span id="editModeIndicator" class="text-orange-600 hidden">(Edit)</span></label>
+                        <div class="pr-form-section pr-form-grid">
+                            <div class="relative col-span-12 sm:col-span-4 lg:col-span-3">
+                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Receipt ID</label>
                                 <div class="relative">
                                     <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-gray-500"><i class="fas fa-hashtag text-xs"></i></span>
                                     <input type="text" name="receipt_id" readonly id="receiptIdInput" tabindex="0"
-                                        class="block w-full pl-7 pr-8 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-emerald-400 cursor-pointer">
-                                    <button type="button" class="absolute right-1 top-1/2 -translate-y-1/2 text-gray-400 hover:text-emerald-600" id="showReceiptListBtn" title="History"><i class="fas fa-history text-xs"></i></button>
+                                        class="block w-full pl-7 pr-8 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-blue-400 focus:border-blue-400 compact-input cursor-pointer"
+                                        placeholder="Auto..." title="Click for recent payments to load">
+                                    <button type="button" class="absolute right-1 top-1/2 -translate-y-1/2 text-gray-400 hover:text-blue-600 p-0.5" id="showReceiptListBtn" title="Recent payments / Load to edit" aria-label="Open payment list">
+                                        <i class="fas fa-history text-xs"></i>
+                                    </button>
                                 </div>
-                                <div id="receiptList" class="hidden absolute z-[60] mt-1 bg-white border border-gray-200 rounded-lg shadow-xl max-h-56 overflow-y-auto w-[min(100%,34rem)]"></div>
+                                <div id="receiptList" class="hidden absolute z-[60] mt-1 bg-white border border-gray-200 rounded-md shadow-lg max-h-72 overflow-y-auto w-[min(100%,20rem)] left-0 text-[9px] leading-tight"></div>
                             </div>
-                            <div class="relative col-span-3">
-                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter">Date</label>
-                                <span class="absolute inset-y-0 left-0 top-5 pl-2 flex items-center pointer-events-none text-emerald-600"><i class="fas fa-calendar-alt text-xs"></i></span>
-                                <input type="datetime-local" name="date_of_transaction" required
-                                    class="block w-full pl-7 pr-1 py-1.5 text-[11px] font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-emerald-400">
+                            <div class="relative col-span-12 sm:col-span-4 lg:col-span-3">
+                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Date</label>
+                                <div class="relative">
+                                    <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-purple-500"><i class="fas fa-calendar-alt text-xs"></i></span>
+                                    <input type="datetime-local" name="date_of_transaction" required
+                                        class="block w-full pl-7 pr-1 py-1.5 text-[11px] font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-purple-400 focus:border-purple-400 compact-input">
+                                </div>
                             </div>
-                            <div class="relative col-span-6">
-                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 flex items-center justify-between uppercase tracking-tighter">
-                                    <span>Party name</span>
+                            <div class="relative col-span-12 sm:col-span-4 lg:col-span-6">
+                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 flex items-center justify-between uppercase tracking-tighter compact-label">
+                                    <span>Party Name</span>
                                     <button type="button" id="addNewPartyBtn" class="text-blue-600 hover:text-blue-800 font-bold transition-all text-[9px] flex items-center uppercase tracking-tighter">
-                                        <i class="fas fa-plus-circle mr-1 text-[10px]"></i> Add new
+                                        <i class="fas fa-plus-circle mr-1 text-[10px]"></i> Add New
                                     </button>
                                 </label>
                                 <div class="relative">
                                     <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-blue-500"><i class="fas fa-user text-xs"></i></span>
-                                    <input type="text" name="party_name" id="partyNameInput" required autocomplete="off" placeholder="Select party"
-                                        class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-blue-400 compact-input">
+                                    <input type="text" name="party_name" id="partyNameInput" required autocomplete="off" spellcheck="false" placeholder="Select Party"
+                                        class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-blue-400 focus:border-blue-400 compact-input">
                                 </div>
-                                <div id="partyList" class="hidden absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-72 overflow-y-auto"></div>
+                                <div id="partyList" class="hidden absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto"></div>
                             </div>
                         </div>
 
-                        <div id="balanceInfoSection" class="hidden px-2 pb-2">
+                        <div id="balanceInfoSection" class="hidden px-2 pb-1">
                             <div class="bg-blue-50 border border-blue-200 rounded-lg p-2 text-xs" id="balanceAlert"></div>
                         </div>
 
-                        <div class="bg-indigo-50 px-3 py-1 border-t border-b border-indigo-100">
-                            <h3 class="text-xs font-bold text-indigo-800 flex items-center">
-                                <i class="fas fa-money-bill-wave mr-1.5 text-xs"></i> Payment details
+                        <div class="bg-emerald-50 px-3 py-1 border-t border-b border-emerald-100">
+                            <h3 class="text-xs font-bold text-emerald-800 flex items-center">
+                                <i class="fas fa-money-bill-wave mr-1.5 text-xs"></i> Payment Details
                             </h3>
                         </div>
-                        <div class="p-2 grid grid-cols-12 gap-1.5">
-                            <div class="col-span-4 relative">
-                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter">Amount (₹)</label>
-                                <span class="absolute inset-y-0 left-0 top-5 pl-2 flex items-center pointer-events-none text-indigo-500"><i class="fas fa-wallet text-xs"></i></span>
-                                <input type="number" step="0.01" name="payment_amount" id="paymentAmount" required placeholder="0.00"
-                                    class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-indigo-400 compact-input">
+                        <div class="pr-form-section pr-form-grid">
+                            <div class="relative col-span-12 sm:col-span-4">
+                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Amount (₹)</label>
+                                <div class="relative">
+                                    <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-indigo-500"><i class="fas fa-wallet text-xs"></i></span>
+                                    <input type="number" step="0.01" name="payment_amount" id="paymentAmount" required placeholder="0.00"
+                                        class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400 compact-input">
+                                </div>
                             </div>
-                            <div class="col-span-4 relative">
-                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter">Method</label>
-                                <span class="absolute inset-y-0 left-0 top-5 pl-2 flex items-center pointer-events-none text-gray-500"><i class="fas fa-credit-card text-xs"></i></span>
-                                <select name="payment_method" required
-                                    class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-gray-400 compact-input">
-                                    <option value="">Select</option>
-                                    <option value="Cash">Cash</option>
-                                    <option value="Bank">Bank</option>
-                                </select>
+                            <div class="relative col-span-12 sm:col-span-4">
+                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Mode</label>
+                                <div class="relative">
+                                    <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-gray-600"><i class="fas fa-credit-card text-xs"></i></span>
+                                    <select name="payment_method" required
+                                        class="block w-full pl-7 pr-1 py-1.5 text-[11px] font-semibold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-gray-400 focus:border-gray-400 compact-input">
+                                        <option value="">Select</option>
+                                        <option value="Cash">Cash</option>
+                                        <option value="Bank">Bank</option>
+                                    </select>
+                                </div>
                             </div>
-                            <div class="col-span-4 relative">
-                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter">Narration</label>
-                                <span class="absolute inset-y-0 left-0 top-5 pl-2 flex items-center pointer-events-none text-gray-400"><i class="fas fa-comment-alt text-xs"></i></span>
-                                <input type="text" name="narration" placeholder="Optional notes…"
-                                    class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold border border-gray-200 rounded focus:ring-1 focus:ring-gray-400 compact-input">
+                            <div class="relative col-span-12 sm:col-span-4">
+                                <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Narration</label>
+                                <div class="relative">
+                                    <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-purple-500"><i class="fas fa-comment-alt text-xs"></i></span>
+                                    <input type="text" name="narration" placeholder="Optional notes..."
+                                        class="block w-full pl-7 pr-2 py-1.5 text-xs font-semibold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-purple-400 focus:border-purple-400 compact-input">
+                                </div>
                             </div>
                         </div>
 
-                        <div class="bg-gray-50 px-3 py-2 border-t border-gray-200 flex items-center gap-2 justify-end flex-wrap">
-                            <button type="button" id="resetFormBtn"
-                                class="px-3 py-1.5 bg-white border border-gray-300 text-gray-700 text-xs font-bold rounded hover:bg-gray-50 shadow-sm"
-                                title="Reset"><i class="fas fa-undo"></i></button>
-                            <button type="button" id="deleteEditedPaymentBtn"
-                                class="hidden px-3 py-1.5 bg-white border border-red-300 text-red-700 text-xs font-bold rounded hover:bg-red-50 shadow-sm"
-                                title="Delete this payment"><i class="fas fa-trash mr-1"></i>Delete</button>
+                        <div class="pr-form-footer">
                             <button type="submit" id="savePaymentBtn"
-                                class="px-5 py-1.5 bg-emerald-600 text-white text-xs font-bold rounded hover:bg-emerald-700 shadow-sm">
-                                <i class="fas fa-save mr-1"></i>Record payment
+                                class="min-w-[7rem] bg-gradient-to-r from-blue-600 to-blue-700 text-white text-[10px] font-bold uppercase py-1.5 px-4 rounded shadow hover:from-blue-700 hover:to-blue-800 transition tracking-tighter">
+                                <i class="fas fa-save mr-1"></i><span id="savePaymentBtnText">Save</span>
                             </button>
+                            <button type="button" id="deleteEditedPaymentBtn"
+                                class="hidden px-2.5 py-1.5 bg-gradient-to-r from-red-600 to-red-700 text-white text-[10px] font-bold rounded hover:from-red-700 hover:to-red-800 shadow-sm"
+                                title="Delete"><i class="fas fa-trash-alt"></i></button>
+                            <button type="button" id="resetFormBtn"
+                                class="px-2.5 py-1.5 bg-white border border-gray-300 text-gray-700 text-[10px] font-bold rounded hover:bg-gray-50 shadow-sm"
+                                title="Reset"><i class="fas fa-undo"></i></button>
                         </div>
                     </form>
             </div>
 
-            <!-- Right — list -->
-            <div class="bg-white rounded-lg shadow-md border border-gray-200 overflow-hidden" style="flex: 0 0 45%;">
+            <!-- Right — Recent payments list -->
+            <div class="bg-white rounded-lg shadow-md border border-gray-200 min-w-0 lg:flex-[1_1_45%] self-start w-full">
                 <div class="bg-blue-50 px-3 py-1.5 border-b border-blue-100 rounded-t-lg">
-                    <h2 class="text-xs font-bold text-blue-800 flex items-center">
-                        <i class="fas fa-list mr-1.5 text-xs"></i> Recent payments
-                    </h2>
+                    <div class="flex items-center justify-between gap-2">
+                        <h2 class="text-xs font-bold text-blue-800 flex items-center">
+                            <i class="fas fa-list mr-1.5 text-xs"></i> Recent Payments
+                        </h2>
+                        <form method="GET" action="" id="dateRangeForm" class="flex items-center gap-1.5">
+                            <input type="date" name="start_date" id="startDate"
+                                value="<?= htmlspecialchars($start_date) ?>"
+                                class="px-1.5 py-0.5 border border-gray-200 rounded text-[10px] w-24 focus:ring-1 focus:ring-blue-400 focus:border-blue-400 bg-white font-medium"
+                                max="<?= date('Y-m-d') ?>" title="From Date">
+                            <span class="text-gray-400 text-[10px] font-bold">to</span>
+                            <input type="date" name="end_date" id="endDate" value="<?= htmlspecialchars($end_date) ?>"
+                                class="px-1.5 py-0.5 border border-gray-200 rounded text-[10px] w-24 focus:ring-1 focus:ring-blue-400 focus:border-blue-400 bg-white font-medium"
+                                max="<?= date('Y-m-d') ?>" title="To Date">
+                            <button type="submit"
+                                class="px-1.5 py-0.5 bg-blue-600 text-white text-[10px] font-bold rounded hover:bg-blue-700 transition shadow-sm"
+                                title="Apply Date Filter">
+                                <i class="fas fa-filter text-[10px]"></i>
+                            </button>
+                        </form>
+                    </div>
                 </div>
-                <div class="p-2 max-w-full">
-                    <div class="overflow-x-auto max-w-full">
-                        <table class="w-full text-sm responsive-table" style="table-layout: fixed; width: 100%; max-width: 100%;">
-                            <thead>
-                                <tr class="bg-gray-50 border-b">
-                                    <th class="text-left py-2 px-1 font-medium text-gray-700 text-sm" style="width: 25%;">Receipt & Date</th>
-                                    <th class="text-left py-2 px-1 font-medium text-gray-700 text-sm" style="width: 25%;">Customer</th>
-                                    <th class="text-left py-2 px-1 font-medium text-gray-700 text-sm" style="width: 25%;">Amount & Method</th>
-                                    <th class="text-left py-2 px-1 font-medium text-gray-700 text-sm" style="width: 15%;">Type</th>
-                                    <th class="text-left py-2 px-1 font-medium text-gray-700 text-sm" style="width: 10%;">Actions</th>
+                <div class="p-2">
+                    <div class="ge-txn-scroll" id="prTxnScroll">
+                        <table class="w-full text-sm text-left text-gray-500 ge-txn-table">
+                            <thead class="bg-slate-50 border-b border-slate-100">
+                                <tr>
+                                    <th class="py-2 px-1 text-center text-[9px] font-bold text-slate-500 ge-serial-col">#</th>
+                                    <th class="py-2 px-2 text-left text-[9px] font-bold text-slate-500 w-16">Id</th>
+                                    <th class="py-2 px-2 text-left text-[9px] font-bold text-slate-500 ge-party-col">Party</th>
+                                    <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500">Amount</th>
+                                    <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500">Method</th>
+                                    <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500 ge-action-col">Action</th>
                                 </tr>
                             </thead>
-                            <tbody>
-                                <?php if ($transactions && $transactions->num_rows > 0):
-                                foreach ($transactions as $t):
+                            <tbody class="divide-y divide-gray-100" id="recentPaymentList">
+                                <?php if (count($transactions_list) > 0):
+                                foreach ($transactions_list as $index => $t):
+                                $serial = $index + 1;
                                 $pay_disp = payment_receipt_list_display_id($t);
                                 $partyLines = payment_receipt_party_display_lines($t);
+                                $is_bank = strcasecmp(trim((string)($t['payment_method'] ?? 'Cash')), 'Cash') !== 0;
                                 ?>
-                                    <tr class="border-b hover:bg-gray-50">
-                                        <td class="py-2 px-1">
-                                            <div class="flex items-center">
-                                                <span class="bg-blue-600 text-white text-xs px-1.5 py-0.5 rounded-full mr-1 font-bold">PAY</span>
-                                                <div>
-                                                    <div class="font-mono text-sm font-bold text-gray-900" title="<?= htmlspecialchars($t['receipt_id']) ?>"><?= htmlspecialchars($pay_disp) ?></div>
-                                                    <div class="text-xs text-gray-500 border-b border-gray-300 pb-0.5"><?= date('d M Y', strtotime($t['date_of_transaction'])) ?></div>
-                                                </div>
+                                    <tr class="ge-txn-row hover:bg-slate-50 transition-colors border-b border-slate-100 last:border-b-0">
+                                        <td class="py-1.5 px-1 align-top text-center ge-serial-col">
+                                            <span class="text-[9px] font-bold text-slate-400 tabular-nums"><?= $serial ?></span>
+                                        </td>
+                                        <td class="py-1.5 px-2 align-top group">
+                                            <div class="text-[10px] font-bold text-blue-600 truncate flex items-center gap-0.5">
+                                                <span class="truncate">#<?= htmlspecialchars($pay_disp) ?></span>
+                                                <?php if ($is_bank): ?>
+                                                    <i class="fas fa-university text-indigo-600 text-[9px] shrink-0" title="Bank"></i>
+                                                <?php else: ?>
+                                                    <i class="fas fa-wallet text-emerald-600 text-[9px] shrink-0" title="Cash"></i>
+                                                <?php endif; ?>
+                                            </div>
+                                            <div class="text-[8px] font-semibold text-slate-400 leading-tight tabular-nums whitespace-nowrap">
+                                                <?= date('d M', strtotime($t['date_of_transaction'])) ?> · <?= date('h:i A', strtotime($t['date_of_transaction'])) ?>
                                             </div>
                                         </td>
-                                        <td class="py-2 px-1">
-                                            <div class="font-semibold text-gray-900 text-sm leading-tight"><?= htmlspecialchars($partyLines['name']) ?></div>
-                                            <div class="text-[11px] text-gray-500"><?= htmlspecialchars($partyLines['sub']) ?></div>
+                                        <td class="py-1.5 px-2 align-top ge-party-col">
+                                            <div class="text-[10px] font-semibold text-slate-800 truncate uppercase" title="<?= htmlspecialchars($partyLines['name']) ?>">
+                                                <?= htmlspecialchars($partyLines['name']) ?>
+                                            </div>
+                                            <div class="text-[8px] font-medium text-slate-400 truncate"><?= htmlspecialchars($partyLines['sub']) ?></div>
                                         </td>
-                                        <td class="py-2 px-1">
-                                            <div class="text-sm font-bold text-blue-700">₹<?= number_format($t['payment_amount'], 2) ?></div>
-                                            <div class="text-xs text-gray-500"><?= htmlspecialchars($t['payment_method']) ?></div>
+                                        <td class="py-1.5 px-2 align-top text-right">
+                                            <div class="text-[10px] font-bold text-slate-800 leading-none">₹<?= pr_format_inr($t['payment_amount']) ?></div>
+                                            <div class="mt-1">
+                                                <span class="text-[7.5px] px-1 py-0.5 rounded bg-green-100 text-green-700 font-bold uppercase tracking-tighter">Received</span>
+                                            </div>
                                         </td>
-                                        <td class="py-2 px-1">
-                                            <span class="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-50 text-blue-800">
-                                                <?= htmlspecialchars($t['payment_type']) ?>
-                                            </span>
+                                        <td class="py-1.5 px-2 align-top text-right">
+                                            <div class="text-[10px] font-semibold text-slate-700 leading-none"><?= htmlspecialchars($t['payment_method'] ?? '—') ?></div>
                                         </td>
-                                        <td class="py-2 px-1">
-                                            <div class="flex items-center space-x-1">
-                                                <button type="button" class="edit-payment-btn text-blue-600 hover:text-blue-800" title="Edit" data-id="<?= $t['id'] ?>">
-                                                    <i class="fas fa-edit text-xs"></i>
+                                        <td class="py-1.5 px-2 align-top ge-action-col whitespace-nowrap">
+                                            <div class="flex items-center justify-end gap-0.5">
+                                                <button type="button" class="ge-action-btn edit-payment-btn text-blue-500 hover:text-blue-700" title="Edit" data-id="<?= (int)$t['id'] ?>">
+                                                    <i class="fas fa-edit"></i>
                                                 </button>
-                                                <button type="button" class="print-payment-btn text-blue-600 hover:text-blue-800" title="Print" data-id="<?= $t['id'] ?>">
-                                                    <i class="fas fa-print text-xs"></i>
+                                                <button type="button" class="ge-action-btn print-payment-btn text-emerald-600 hover:text-emerald-800" title="Print" data-id="<?= (int)$t['id'] ?>">
+                                                    <i class="fas fa-print"></i>
                                                 </button>
-                                                <button type="button" class="delete-payment-btn text-red-600 hover:text-red-800" title="Delete" data-id="<?= $t['id'] ?>" data-receipt-id="<?= htmlspecialchars($t['receipt_id']) ?>" data-display-id="<?= htmlspecialchars($pay_disp) ?>" data-amount="<?= $t['payment_amount'] ?>">
-                                                    <i class="fas fa-trash text-xs"></i>
+                                                <button type="button" class="ge-action-btn delete-payment-btn text-red-500 hover:text-red-700" title="Delete"
+                                                    data-id="<?= (int)$t['id'] ?>"
+                                                    data-receipt-id="<?= htmlspecialchars($t['receipt_id']) ?>"
+                                                    data-display-id="<?= htmlspecialchars($pay_disp) ?>"
+                                                    data-amount="<?= $t['payment_amount'] ?>">
+                                                    <i class="fas fa-trash"></i>
                                                 </button>
                                             </div>
                                         </td>
                                     </tr>
-                                <?php endforeach; 
+                                <?php endforeach;
                                 else: ?>
                                     <tr>
-                                        <td colspan="5" class="text-center py-8 text-gray-500">
+                                        <td colspan="6" class="text-center py-8 text-gray-500">
                                             <i class="fas fa-inbox text-2xl mb-2"></i><br>
                                             No payments found
                                         </td>
@@ -1197,19 +1343,8 @@ if ($total_result && $transactions) {
                             </tbody>
                         </table>
                     </div>
-                    
-                    <!-- Pagination -->
-                    <?php if ($total_pages > 1): ?>
-                    <div class="mt-4 flex justify-center">
-                        <nav class="flex space-x-1">
-                            <?php for ($i = 1; $i <= $total_pages; $i++): ?>
-                                <a href="?page=<?= $i ?><?= isset($_GET['search']) ? '&search=' . htmlspecialchars($_GET['search']) : '' ?>" 
-                                   class="px-3 py-2 text-sm border border-gray-300 rounded-lg <?= $i == $page ? 'bg-blue-600 text-white border-blue-600' : 'text-gray-700 hover:bg-gray-50' ?>">
-                                    <?= $i ?>
-                                </a>
-                            <?php endfor; ?>
-                        </nav>
-                    </div>
+                    <?php if ($payment_list_has_more): ?>
+                    <p class="text-[9px] text-slate-400 text-center mt-1">Showing first <?= count($transactions_list) ?> of <?= $total_transactions ?> — narrow the date range to see more</p>
                     <?php endif; ?>
                 </div>
             </div>
@@ -1222,6 +1357,8 @@ if ($total_result && $transactions) {
     <script src="js/keyboard-navigation-generic.js"></script>
     <script>
         $(document).ready(function() {
+            const prSaveBtnClass = 'min-w-[7rem] bg-gradient-to-r from-blue-600 to-blue-700 text-white text-[10px] font-bold uppercase py-1.5 px-4 rounded shadow hover:from-blue-700 hover:to-blue-800 transition tracking-tighter';
+
             // Generate payment ID
             function generatePaymentId() {
                 return new Promise((resolve, reject) => {
@@ -1396,7 +1533,7 @@ if ($total_result && $transactions) {
                         $('[name="narration"]').val(data.narration || '');
                         
                         // Change button to Update mode
-                        $('#savePaymentBtn').html('<i class="fas fa-save mr-1"></i>Update receipt').attr('class', 'px-5 py-1.5 bg-orange-600 text-white text-xs font-bold rounded hover:bg-orange-700 shadow-sm');
+                        $('#savePaymentBtn').html('<i class="fas fa-save mr-1"></i><span id="savePaymentBtnText">Update</span>').attr('class', prSaveBtnClass);
                         
                         $('#paymentForm').closest('.bg-white').css('border', '2px solid #f97316');
                         $('#deleteEditedPaymentBtn').removeClass('hidden');
@@ -2007,8 +2144,8 @@ if ($total_result && $transactions) {
                         $('#editModeIndicator').removeClass('hidden');
                         
                         const submitBtn = $('#paymentForm button[type="submit"]');
-                        submitBtn.html('<i class="fas fa-save mr-1"></i>Update receipt');
-                        submitBtn.attr('class', 'px-5 py-1.5 bg-orange-600 text-white text-xs font-bold rounded hover:bg-orange-700 shadow-sm');
+                        submitBtn.html('<i class="fas fa-save mr-1"></i><span id="savePaymentBtnText">Update</span>');
+                        submitBtn.attr('class', prSaveBtnClass);
                         $('#paymentForm').closest('.bg-white').css('border', '2px solid #f97316');
                         $('#deleteEditedPaymentBtn').removeClass('hidden');
                         
@@ -2120,8 +2257,8 @@ if ($total_result && $transactions) {
                 
                 // Reset submit button
                 const submitBtn = $('#paymentForm button[type="submit"]');
-                submitBtn.html('<i class="fas fa-save mr-1"></i>Record payment');
-                submitBtn.attr('class', 'px-5 py-1.5 bg-emerald-600 text-white text-xs font-bold rounded hover:bg-emerald-700 shadow-sm');
+                submitBtn.html('<i class="fas fa-save mr-1"></i><span id="savePaymentBtnText">Save</span>');
+                submitBtn.attr('class', prSaveBtnClass);
                 $('#deleteEditedPaymentBtn').addClass('hidden');
                 
                 // Regenerate payment ID and reset date
@@ -2132,6 +2269,27 @@ if ($total_result && $transactions) {
                     $('#partyNameInput').focus();
                 }, 100);
             }
+
+            /* Date range filter validation (same as exchange.php) */
+            $('#startDate, #endDate').on('change', function () {
+                const startDate = new Date($('#startDate').val());
+                const endDate = new Date($('#endDate').val());
+                if (startDate > endDate) {
+                    Swal.fire({
+                        icon: 'warning',
+                        title: 'Invalid Date Range',
+                        text: 'End date must be greater than or equal to start date',
+                        confirmButtonColor: '#3085d6',
+                        timer: 2000,
+                        showConfirmButton: false
+                    });
+                    if ($(this).attr('id') === 'startDate') {
+                        $('#endDate').val($('#startDate').val());
+                    } else {
+                        $('#startDate').val($('#endDate').val());
+                    }
+                }
+            });
         });
     </script>
 

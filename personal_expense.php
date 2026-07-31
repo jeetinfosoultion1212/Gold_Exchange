@@ -498,11 +498,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
 }
 
 /** Read-only fine vault row for stats (matches exchange “Fine Gold” / “Fine Silver” preference). */
-function personal_expense_fine_stock_qty(mysqli $conn, int $company_id, string $material): float
+function personal_expense_fine_stock_row(mysqli $conn, int $company_id, string $material): ?array
 {
     $fineP = '(purity >= 99.50 OR purity = 100.00 OR purity = 100.0 OR purity = 100)';
     if (strcasecmp(trim($material), 'Silver') === 0) {
-        $sql = "SELECT current_stock FROM gold_stock
+        $sql = "SELECT stock_name, purity, current_stock FROM gold_stock
             WHERE company_id = ? AND mode = 'Cash'
             AND {$fineP}
             AND (LOWER(stock_name) LIKE '%silver%')
@@ -511,7 +511,7 @@ function personal_expense_fine_stock_qty(mysqli $conn, int $company_id, string $
                 purity DESC, id ASC
             LIMIT 1";
     } else {
-        $sql = "SELECT current_stock FROM gold_stock
+        $sql = "SELECT stock_name, purity, current_stock FROM gold_stock
             WHERE company_id = ? AND mode = 'Cash'
             AND {$fineP}
             AND NOT (LOWER(stock_name) LIKE '%silver%')
@@ -522,15 +522,21 @@ function personal_expense_fine_stock_qty(mysqli $conn, int $company_id, string $
     }
     $st = $conn->prepare($sql);
     if (!$st) {
-        return 0.0;
+        return null;
     }
     $st->bind_param('i', $company_id);
     $st->execute();
     $res = $st->get_result();
     if ($res && ($row = $res->fetch_assoc())) {
-        return (float) ($row['current_stock'] ?? 0);
+        return $row;
     }
-    return 0.0;
+    return null;
+}
+
+function personal_expense_fine_stock_qty(mysqli $conn, int $company_id, string $material): float
+{
+    $row = personal_expense_fine_stock_row($conn, $company_id, $material);
+    return $row ? (float) ($row['current_stock'] ?? 0) : 0.0;
 }
 
 $pe_stats = [
@@ -551,12 +557,75 @@ if ($bal_res && ($br = $bal_res->fetch_assoc())) {
 }
 $pe_stats['fine_gold_g'] = personal_expense_fine_stock_qty($conn, $company_id, 'Gold');
 $pe_stats['fine_silver_g'] = personal_expense_fine_stock_qty($conn, $company_id, 'Silver');
+$pe_default_fine_gold = personal_expense_fine_stock_row($conn, $company_id, 'Gold');
+
+function pe_format_inr($amount, int $decimals = 0): string
+{
+    $amount = (float) $amount;
+    $negative = $amount < 0;
+    $amount = abs(round($amount, $decimals));
+    $parts = explode('.', number_format($amount, $decimals, '.', ''));
+    $integer = $parts[0];
+    $decimalPart = $decimals > 0 ? ('.' . $parts[1]) : '';
+    $lastThree = substr($integer, -3);
+    $rest = substr($integer, 0, -3);
+    if ($rest !== '') {
+        $lastThree = ',' . $lastThree;
+        $rest = (string) preg_replace('/\B(?=(\d{2})+(?!\d))/', ',', $rest);
+    }
+    return ($negative ? '-' : '') . $rest . $lastThree . $decimalPart;
+}
+
+function pe_kind_short_label(string $bk): string
+{
+    $map = [
+        'PE_Take_Cash' => 'Take cash',
+        'PE_Give_Cash' => 'Give cash',
+        'PE_Take_Gold' => 'Take gold',
+        'PE_Give_Gold' => 'Give gold',
+    ];
+    return $map[$bk] ?? $bk;
+}
+
+function pe_kind_badge_class(string $bk): string
+{
+    if (strpos($bk, 'Take') !== false) {
+        return 'bg-emerald-100 text-emerald-700';
+    }
+    if (strpos($bk, 'Give') !== false) {
+        return 'bg-orange-100 text-orange-700';
+    }
+    return 'bg-slate-100 text-slate-700';
+}
+
+function pe_entry_detail_line(array $r): string
+{
+    $lbl = (string) ($r['booking_type'] ?? '');
+    if (strpos($lbl, 'Cash') !== false) {
+        return '₹' . pe_format_inr($r['payment_amount'] ?? 0, 2) . ' · ' . ($r['payment_method'] ?? '');
+    }
+    return number_format((float) ($r['gold_weight'] ?? 0), 3) . 'g @ '
+        . number_format((float) ($r['purity'] ?? 0), 2) . '%';
+}
+
+$start_date = isset($_GET['start_date']) && !empty($_GET['start_date']) ? $_GET['start_date'] : date('Y-m-d');
+$end_date = isset($_GET['end_date']) && !empty($_GET['end_date']) ? $_GET['end_date'] : date('Y-m-d');
+$pe_list_limit = 100;
 
 $recent_sql = "SELECT t.*, p.party_name FROM transactions t 
     LEFT JOIN parties p ON t.party_id = p.id AND p.company_id = t.company_id
-    WHERE t.company_id = $company_id AND t.transaction_type = 'Personal_Expense' 
-    ORDER BY t.date_of_transaction DESC, t.id DESC LIMIT 15";
+    WHERE t.company_id = $company_id AND t.transaction_type = 'Personal_Expense'
+    AND DATE(t.date_of_transaction) BETWEEN '$start_date' AND '$end_date'
+    ORDER BY t.date_of_transaction DESC, t.id DESC LIMIT $pe_list_limit";
 $recent_res = $conn->query($recent_sql);
+$recent_list = ($recent_res && $recent_res->num_rows > 0) ? $recent_res->fetch_all(MYSQLI_ASSOC) : [];
+
+$pe_count_sql = "SELECT COUNT(*) AS cnt FROM transactions t
+    WHERE t.company_id = $company_id AND t.transaction_type = 'Personal_Expense'
+    AND DATE(t.date_of_transaction) BETWEEN '$start_date' AND '$end_date'";
+$pe_count_res = $conn->query($pe_count_sql);
+$pe_total_entries = ($pe_count_res) ? (int) $pe_count_res->fetch_assoc()['cnt'] : 0;
+$pe_list_has_more = $pe_total_entries > count($recent_list);
 
 $stocks_sql = "SELECT DISTINCT stock_name, purity, current_stock FROM gold_stock WHERE company_id = $company_id ORDER BY purity DESC";
 $stocks_res = $conn->query($stocks_sql);
@@ -571,128 +640,265 @@ $page_title = 'Personal expense';
 ?>
 
 <style>
-.soft-gradient-slate { background: linear-gradient(135deg, rgba(71, 85, 105, 0.12), rgba(71, 85, 105, 0.04)); }
-.soft-gradient-amber { background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(245, 158, 11, 0.04)); }
-.soft-gradient-green { background: linear-gradient(135deg, rgba(34, 197, 94, 0.1), rgba(34, 197, 94, 0.04)); }
-.soft-gradient-blue { background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(59, 130, 246, 0.04)); }
-.soft-gradient-yellow { background: linear-gradient(135deg, rgba(234, 179, 8, 0.12), rgba(234, 179, 8, 0.05)); }
-.soft-gradient-gray { background: linear-gradient(135deg, rgba(148, 163, 184, 0.14), rgba(148, 163, 184, 0.05)); }
-.compact-input { padding-top: 0.375rem !important; padding-bottom: 0.375rem !important; font-size: 0.75rem !important; }
-#pePartyList, #peReceiptList { z-index: 50; }
-</style>
+        .stats-card-label {
+            font-size: 10px;
+            font-weight: 500;
+            letter-spacing: 0.02em;
+            color: rgb(100 116 139);
+        }
+        .stats-card-value {
+            font-size: 1rem;
+            font-weight: 600;
+            color: rgb(51 65 85);
+            font-variant-numeric: tabular-nums;
+        }
+        .stats-icon-wrap {
+            width: 2rem;
+            height: 2rem;
+            border-radius: 0.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .compact-input { padding-top: 0.375rem !important; padding-bottom: 0.375rem !important; font-size: 0.75rem !important; }
+        .compact-label { font-size: 0.65rem !important; margin-bottom: 0.1rem !important; }
+        #pePartyList, #peReceiptList { z-index: 50; }
+        #pePartyList {
+            position: absolute !important;
+            top: 100% !important;
+            left: 0 !important;
+            right: 0 !important;
+            width: 100% !important;
+        }
+        .ge-action-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 1.4rem;
+            height: 1.4rem;
+            border-radius: 0.25rem;
+            flex-shrink: 0;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            padding: 0;
+        }
+        .ge-action-btn i { font-size: 10px; line-height: 1; pointer-events: none; }
+        .ge-action-btn:hover { background: rgba(148, 163, 184, 0.18); }
+        .ge-txn-table .ge-action-col {
+            width: 3.75rem;
+            min-width: 3.75rem;
+            padding-left: 0.2rem !important;
+            padding-right: 0.3rem !important;
+        }
+        .ge-txn-scroll {
+            max-height: calc(100vh - 300px);
+            min-height: 220px;
+            overflow-y: auto;
+            overflow-x: auto;
+        }
+        .ge-txn-scroll thead th {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            background-color: #f8fafc;
+            box-shadow: 0 1px 0 #e2e8f0;
+        }
+        .ge-txn-table thead th { white-space: nowrap; }
+        .ge-txn-table .ge-serial-col {
+            width: 1.75rem;
+            min-width: 1.75rem;
+            padding-left: 0.35rem !important;
+            padding-right: 0.25rem !important;
+            text-align: center;
+        }
+        .ge-txn-table .ge-party-col {
+            width: 5.75rem;
+            max-width: 5.75rem;
+            padding-left: 0.3rem !important;
+            padding-right: 0.3rem !important;
+        }
+        .ge-txn-table td,
+        .ge-txn-table th {
+            padding-left: 0.35rem;
+            padding-right: 0.35rem;
+        }
+        .ge-txn-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+        .ge-txn-scroll::-webkit-scrollbar-thumb { background: rgba(148, 163, 184, 0.5); border-radius: 3px; }
+        .ge-txn-scroll::-webkit-scrollbar-track { background: transparent; }
+        .pr-form-section { padding: 0.375rem 0.5rem; }
+        .pr-form-grid {
+            display: grid;
+            grid-template-columns: repeat(12, minmax(0, 1fr));
+            gap: 0.375rem;
+            align-items: end;
+        }
+        .pr-form-footer {
+            padding: 0.375rem 0.5rem;
+            border-top: 1px solid #e5e7eb;
+            background: #f9fafb;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 0.25rem;
+        }
+        /* Inline validation — overlay below field, no layout shift */
+        .validation-error {
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: 100%;
+            z-index: 40;
+            font-size: 9px;
+            line-height: 1.15;
+            color: #dc2626;
+            margin-top: 1px;
+            pointer-events: none;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .validation-error.hidden { display: none; }
+        input.border-red-500,
+        select.border-red-500,
+        textarea.border-red-500 {
+            border-color: #ef4444 !important;
+            box-shadow: 0 0 0 1px #ef4444;
+        }
+    </style>
 
-<div class="w-full px-1 pb-4">
-    <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-4 gap-2 mb-2">
-        <div class="soft-gradient-green rounded-xl p-2 shadow-sm border border-slate-200/50">
-            <div class="flex items-center justify-between gap-1">
-                <div class="min-w-0">
-                    <p class="text-[9px] font-bold text-emerald-800 uppercase tracking-tighter leading-none mb-0.5">Cash in hand</p>
-                    <p class="text-[13px] font-bold text-emerald-900 leading-none truncate">₹<?= number_format($pe_stats['cash_in_hand'], 0) ?></p>
-                    <p class="text-[9px] text-emerald-700/80">Company</p>
+<div class="w-full min-w-0 px-1 pb-4">
+    <div class="overflow-x-auto pb-1 -mx-0.5 px-0.5">
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3 min-w-0 w-full">
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Cash in hand</p>
+                        <p class="stats-card-value leading-tight">₹<?= pe_format_inr($pe_stats['cash_in_hand']) ?></p>
+                    </div>
+                    <div class="stats-icon-wrap bg-emerald-100 shrink-0">
+                        <i class="fas fa-wallet text-emerald-600 text-xs"></i>
+                    </div>
                 </div>
-                <div class="w-6 h-6 bg-emerald-500 rounded shrink-0 flex items-center justify-center"><i class="fas fa-wallet text-white text-[9px]"></i></div>
             </div>
-        </div>
-        <div class="soft-gradient-blue rounded-xl p-2 shadow-sm border border-slate-200/50">
-            <div class="flex items-center justify-between gap-1">
-                <div class="min-w-0">
-                    <p class="text-[9px] font-bold text-blue-800 uppercase tracking-tighter leading-none mb-0.5">Bank balance</p>
-                    <p class="text-[13px] font-bold text-blue-900 leading-none truncate">₹<?= number_format($pe_stats['bank_balance'], 0) ?></p>
-                    <p class="text-[9px] text-blue-700/80">Company</p>
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Bank balance</p>
+                        <p class="stats-card-value leading-tight">₹<?= pe_format_inr($pe_stats['bank_balance']) ?></p>
+                    </div>
+                    <div class="stats-icon-wrap bg-blue-100 shrink-0">
+                        <i class="fas fa-university text-blue-600 text-xs"></i>
+                    </div>
                 </div>
-                <div class="w-6 h-6 bg-blue-500 rounded shrink-0 flex items-center justify-center"><i class="fas fa-university text-white text-[9px]"></i></div>
             </div>
-        </div>
-        <div class="soft-gradient-yellow rounded-xl p-2 shadow-sm border border-slate-200/50">
-            <div class="flex items-center justify-between gap-1">
-                <div class="min-w-0">
-                    <p class="text-[9px] font-bold text-amber-900 uppercase tracking-tighter leading-none mb-0.5">Fine stock gold</p>
-                    <p class="text-[13px] font-bold text-amber-950 leading-none truncate"><?= number_format($pe_stats['fine_gold_g'], 3) ?> g</p>
-                    <p class="text-[9px] text-amber-800/90">Vault row</p>
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Fine stock gold</p>
+                        <p class="stats-card-value leading-tight"><?= number_format($pe_stats['fine_gold_g'], 3) ?> g</p>
+                    </div>
+                    <div class="stats-icon-wrap bg-amber-100 shrink-0">
+                        <i class="fas fa-coins text-amber-600 text-xs"></i>
+                    </div>
                 </div>
-                <div class="w-6 h-6 bg-amber-500 rounded shrink-0 flex items-center justify-center"><i class="fas fa-coins text-white text-[9px]"></i></div>
             </div>
-        </div>
-        <div class="soft-gradient-gray rounded-xl p-2 shadow-sm border border-slate-200/50">
-            <div class="flex items-center justify-between gap-1">
-                <div class="min-w-0">
-                    <p class="text-[9px] font-bold text-slate-700 uppercase tracking-tighter leading-none mb-0.5">Fine stock silver</p>
-                    <p class="text-[13px] font-bold text-slate-900 leading-none truncate"><?= number_format($pe_stats['fine_silver_g'], 3) ?> g</p>
-                    <p class="text-[9px] text-slate-600">Vault row</p>
+            <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0 flex-1">
+                        <p class="stats-card-label uppercase">Fine stock silver</p>
+                        <p class="stats-card-value leading-tight"><?= number_format($pe_stats['fine_silver_g'], 3) ?> g</p>
+                    </div>
+                    <div class="stats-icon-wrap bg-slate-100 shrink-0">
+                        <i class="fas fa-gem text-slate-600 text-xs"></i>
+                    </div>
                 </div>
-                <div class="w-6 h-6 bg-slate-500 rounded shrink-0 flex items-center justify-center"><i class="fas fa-gem text-white text-[9px]" title="Fine silver"></i></div>
             </div>
         </div>
     </div>
-    <p class="text-[10px] text-slate-600 mb-3 leading-snug px-0.5">Updates party <b>cash</b> / <b>bank</b> on take or give cash; party <b>gold balance</b> on take gold (−) or give gold (+), plus stock.</p>
 
-    <div class="flex flex-col lg:flex-row gap-3">
-        <div id="peFormCard" class="bg-white rounded-lg shadow border border-gray-200 lg:flex-[1.1]">
-            <div class="bg-gradient-to-r from-slate-600 to-slate-700 px-3 py-1.5 rounded-t-lg">
-                <h2 class="text-xs font-bold text-white flex items-center gap-1">
-                    <i class="fas fa-hand-holding-dollar"></i> New entry
-                </h2>
-            </div>
-            <form id="peForm" class="p-2 space-y-2" onsubmit="return false;">
+    <div class="flex flex-col lg:flex-row gap-4 min-w-0 w-full lg:items-start">
+        <div id="peFormCard" class="bg-white rounded-lg shadow-md border border-gray-200 min-w-0 lg:flex-[1_1_55%] overflow-hidden self-start w-full">
+            <form id="peForm" class="overflow-hidden" onsubmit="return false;">
                 <input type="hidden" name="transaction_id" id="peEditTransactionId" value="">
-                <div class="overflow-x-auto pb-0.5 -mx-0.5 px-0.5">
-                <div class="grid grid-cols-12 gap-1.5 items-end min-w-[36rem]">
-                    <div class="col-span-4 min-w-0 relative">
-                        <label class="block text-[10px] font-bold text-gray-600 uppercase">Receipt <span id="peEditModeIndicator" class="text-orange-600 hidden">(Edit)</span></label>
+
+                <div class="bg-blue-50 px-3 py-1 border-b border-blue-100">
+                    <h3 class="text-xs font-bold text-blue-800 flex items-center">
+                        <i class="fas fa-file-invoice mr-1.5 text-xs"></i> Transaction Details
+                        <span id="peEditModeIndicator" class="ml-2 text-orange-600 hidden text-[10px]">(Edit)</span>
+                    </h3>
+                </div>
+                <div class="pr-form-section pr-form-grid">
+                    <div class="relative col-span-12 sm:col-span-4 lg:col-span-3">
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Receipt</label>
                         <div class="relative">
-                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-slate-400"><i class="fas fa-hashtag text-[10px]"></i></span>
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-gray-500"><i class="fas fa-hashtag text-xs"></i></span>
                             <input type="text" name="receipt_id" id="peReceiptId" readonly tabindex="0"
-                                class="compact-input block w-full border rounded pl-6 pr-8 py-1 text-xs font-mono bg-gray-50 cursor-pointer">
-                            <button type="button" id="showPeListBtn" class="absolute right-1 top-1/2 -translate-y-1/2 text-gray-400 hover:text-slate-700" title="Open history"><i class="fas fa-history text-xs"></i></button>
+                                class="block w-full pl-7 pr-8 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-blue-400 focus:border-blue-400 compact-input cursor-pointer">
+                            <button type="button" id="showPeListBtn" class="absolute right-1 top-1/2 -translate-y-1/2 text-gray-400 hover:text-blue-600 p-0.5" title="Recent entries"><i class="fas fa-history text-xs"></i></button>
                         </div>
-                        <div id="peReceiptList" class="hidden absolute left-0 right-0 mt-0.5 bg-white border rounded shadow-lg max-h-56 overflow-y-auto z-50"></div>
+                        <div id="peReceiptList" class="hidden absolute z-[60] mt-1 bg-white border border-gray-200 rounded-md shadow-lg max-h-72 overflow-y-auto w-[min(100%,20rem)] left-0 text-[9px] leading-tight"></div>
                     </div>
-                    <div class="col-span-3 min-w-0">
-                        <label class="block text-[10px] font-bold text-gray-600 uppercase">Date</label>
+                    <div class="relative col-span-12 sm:col-span-4 lg:col-span-3">
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Date</label>
                         <div class="relative">
-                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-slate-500"><i class="fas fa-calendar-alt text-[10px]"></i></span>
-                            <input type="datetime-local" name="date_of_transaction" id="peDate" required class="compact-input block w-full border rounded pl-7 pr-1 py-1 text-[11px]">
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-purple-500"><i class="fas fa-calendar-alt text-xs"></i></span>
+                            <input type="datetime-local" name="date_of_transaction" id="peDate" required
+                                class="block w-full pl-7 pr-1 py-1.5 text-[11px] font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-purple-400 focus:border-purple-400 compact-input">
                         </div>
                     </div>
-                    <div class="col-span-5 min-w-0 relative">
-                        <label class="block text-[10px] font-bold text-gray-600 uppercase flex items-center justify-between gap-1">
+                    <div class="relative col-span-12 sm:col-span-4 lg:col-span-6">
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 flex items-center justify-between uppercase tracking-tighter compact-label">
                             <span>Party</span>
-                            <button type="button" id="peAddPartyBtn" class="text-slate-700 hover:text-slate-900 font-bold text-[9px] flex items-center uppercase tracking-tighter shrink-0">
-                                <i class="fas fa-plus-circle mr-0.5 text-[10px]"></i>New
+                            <button type="button" id="peAddPartyBtn" class="text-blue-600 hover:text-blue-800 font-bold transition-all text-[9px] flex items-center uppercase tracking-tighter">
+                                <i class="fas fa-plus-circle mr-1 text-[10px]"></i> Add New
                             </button>
                         </label>
                         <div class="relative">
-                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-slate-500"><i class="fas fa-user text-xs"></i></span>
-                            <input type="text" id="pePartyName" autocomplete="off" placeholder="Search party" class="compact-input block w-full border rounded pl-7 pr-2 py-1 text-xs font-bold text-gray-900" required>
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-blue-500"><i class="fas fa-user text-xs"></i></span>
+                            <input type="text" id="pePartyName" autocomplete="off" spellcheck="false" placeholder="Search party" required
+                                class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-blue-400 focus:border-blue-400 compact-input">
                         </div>
                         <input type="hidden" name="party_id" id="pePartyId">
-                        <div id="pePartyList" class="hidden absolute z-50 left-0 right-0 top-full mt-0.5 bg-white border border-gray-200 rounded-lg shadow-lg max-h-72 overflow-y-auto"></div>
+                        <div id="pePartyList" class="hidden absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto"></div>
                     </div>
-                    <div id="pePartyInfoSection" class="col-span-12 hidden px-2 pb-1">
-                        <div class="bg-slate-50/90 border border-slate-200 rounded-md px-2 py-1.5 text-xs" id="pePartyInfoAlert"></div>
-                    </div>
-                    <div class="col-span-4 min-w-0">
-                        <label class="block text-[10px] font-bold text-gray-600 uppercase">Type</label>
-                        <select name="pe_kind" id="peKind" class="compact-input block w-full border rounded px-2 py-1 text-xs font-bold">
+                </div>
+
+                <div id="pePartyInfoSection" class="hidden px-2 pb-1">
+                    <div class="bg-blue-50 border border-blue-200 rounded-lg p-2 text-xs" id="pePartyInfoAlert"></div>
+                </div>
+
+                <div class="bg-emerald-50 px-3 py-1 border-t border-b border-emerald-100">
+                    <h3 class="text-xs font-bold text-emerald-800 flex items-center">
+                        <i class="fas fa-hand-holding-dollar mr-1.5 text-xs"></i> Entry Details
+                    </h3>
+                </div>
+                <div class="pr-form-section pr-form-grid">
+                    <div class="relative col-span-12 sm:col-span-4">
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Type</label>
+                        <select name="pe_kind" id="peKind"
+                            class="block w-full px-2 py-1.5 text-[11px] font-semibold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-gray-400 focus:border-gray-400 compact-input">
                             <option value="take_cash">Take cash (into shop)</option>
                             <option value="give_cash">Give cash (from shop)</option>
                             <option value="take_gold">Take gold (into stock, party gold −)</option>
                             <option value="give_gold">Give gold (stock −, party gold +)</option>
                         </select>
                     </div>
-                    <div id="peCashBlock" class="col-span-8 min-w-0 grid grid-cols-2 gap-1.5">
-                        <div class="min-w-0">
-                            <label class="block text-[10px] font-bold text-gray-600 uppercase">Amount (₹)</label>
+                    <div id="peCashBlock" class="col-span-12 sm:col-span-8 grid grid-cols-12 gap-1.5 items-end">
+                        <div class="relative col-span-12 sm:col-span-6">
+                            <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Amount (₹)</label>
                             <div class="relative">
-                                <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-slate-500"><i class="fas fa-wallet text-[10px]"></i></span>
-                                <input type="number" step="0.01" name="cash_amount" id="peCashAmt" class="compact-input block w-full border rounded pl-7 pr-2 py-1 text-xs">
+                                <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-indigo-500"><i class="fas fa-wallet text-xs"></i></span>
+                                <input type="number" step="0.01" name="cash_amount" id="peCashAmt" placeholder="0.00"
+                                    class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-indigo-400 focus:border-indigo-400 compact-input">
                             </div>
                         </div>
-                        <div class="min-w-0">
-                            <label class="block text-[10px] font-bold text-gray-600 uppercase">Method</label>
+                        <div class="relative col-span-12 sm:col-span-6">
+                            <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Method</label>
                             <div class="relative">
-                                <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-slate-400 z-[1]"><i class="fas fa-credit-card text-[10px]"></i></span>
-                                <select name="payment_method" id="pePayMeth" class="compact-input block w-full border rounded pl-7 pr-2 py-1 text-xs">
+                                <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-gray-600"><i class="fas fa-credit-card text-xs"></i></span>
+                                <select name="payment_method" id="pePayMeth"
+                                    class="block w-full pl-7 pr-1 py-1.5 text-[11px] font-semibold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-gray-400 focus:border-gray-400 compact-input">
                                     <option value="Cash">Cash</option>
                                     <option value="Bank">Bank</option>
                                     <option value="UPI">UPI</option>
@@ -701,83 +907,169 @@ $page_title = 'Personal expense';
                             </div>
                         </div>
                     </div>
-                    <div id="peGoldBlock" class="col-span-8 min-w-0 hidden grid grid-cols-4 gap-1.5">
-                        <div class="min-w-0">
-                            <label class="block text-[10px] font-bold text-gray-600 uppercase">Wt (g)</label>
-                            <input type="number" step="0.001" name="gold_weight" id="peGoldW" class="compact-input block w-full border rounded px-1 py-1 text-xs" title="Weight (g)">
-                        </div>
-                        <div class="min-w-0">
-                            <label class="block text-[10px] font-bold text-gray-600 uppercase">Purity %</label>
-                            <input type="number" step="0.01" name="purity" id="pePurity" class="compact-input block w-full border rounded px-1 py-1 text-xs">
-                        </div>
-                        <div class="min-w-0">
-                            <label class="block text-[10px] font-bold text-gray-600 uppercase">Rate</label>
-                            <input type="number" step="0.01" name="gold_rate" id="peGoldRate" class="compact-input block w-full border rounded px-1 py-1 text-xs" value="0" title="₹/g">
-                        </div>
-                        <div class="min-w-0">
-                            <label class="block text-[10px] font-bold text-gray-600 uppercase">Stock</label>
-                            <select name="stock_name" id="peStockName" class="compact-input block w-full border rounded px-1 py-1 text-xs truncate max-w-full" title="Optional; match by purity if empty">
+                    <div id="peGoldBlock" class="col-span-12 sm:col-span-8 hidden grid grid-cols-12 gap-1.5 items-end">
+                        <div class="relative col-span-6 sm:col-span-3">
+                            <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Stock</label>
+                            <select name="stock_name" id="peStockName" title="Fine gold for give gold; match by purity if empty"
+                                class="block w-full px-1 py-1.5 text-[11px] font-semibold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-gray-400 focus:border-gray-400 compact-input truncate">
                                 <option value="">— Purity —</option>
-                                <?php foreach ($stock_rows as $sr): ?>
-                                <option value="<?= htmlspecialchars($sr['stock_name']) ?>" data-purity="<?= htmlspecialchars((string)$sr['purity']) ?>">
-                                    <?= htmlspecialchars($sr['stock_name'] ?: 'Stock') ?> · <?= htmlspecialchars((string)$sr['purity']) ?>%
+                                <?php foreach ($stock_rows as $sr):
+                                    $sn = (string) ($sr['stock_name'] ?? '');
+                                    $isDefaultFine = $pe_default_fine_gold && $sn === (string) ($pe_default_fine_gold['stock_name'] ?? '');
+                                ?>
+                                <option value="<?= htmlspecialchars($sn) ?>" data-purity="<?= htmlspecialchars((string)$sr['purity']) ?>"<?= $isDefaultFine ? ' data-fine-gold="1"' : '' ?>>
+                                    <?= htmlspecialchars($sn ?: 'Stock') ?> · <?= htmlspecialchars((string)$sr['purity']) ?>%
                                 </option>
                                 <?php endforeach; ?>
                             </select>
                         </div>
+                        <div class="relative col-span-6 sm:col-span-3">
+                            <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Wt (g)</label>
+                            <input type="number" step="0.001" name="gold_weight" id="peGoldW" title="Weight (g)"
+                                class="block w-full px-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-amber-400 focus:border-amber-400 compact-input">
+                        </div>
+                        <div class="relative col-span-6 sm:col-span-3">
+                            <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Purity %</label>
+                            <input type="number" step="0.01" name="purity" id="pePurity"
+                                class="block w-full px-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-amber-400 focus:border-amber-400 compact-input">
+                        </div>
+                        <div class="relative col-span-6 sm:col-span-3">
+                            <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Rate</label>
+                            <input type="number" step="0.01" name="gold_rate" id="peGoldRate" value="0" title="₹/g"
+                                class="block w-full px-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-amber-400 focus:border-amber-400 compact-input">
+                        </div>
                     </div>
-                    <div class="col-span-12">
-                        <label class="block text-[10px] font-bold text-gray-600 uppercase">Notes</label>
-                        <textarea name="narration" rows="2" class="compact-input block w-full border rounded px-2 py-1 text-xs" placeholder="Optional"></textarea>
+                    <div class="relative col-span-12">
+                        <label class="block text-[10px] font-bold text-gray-700 mb-0.5 uppercase tracking-tighter compact-label">Notes</label>
+                        <div class="relative">
+                            <span class="absolute inset-y-0 left-0 pl-2 flex items-center pointer-events-none text-purple-500"><i class="fas fa-comment-alt text-xs"></i></span>
+                            <input type="text" name="narration" placeholder="Optional"
+                                class="block w-full pl-7 pr-2 py-1.5 text-xs font-semibold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-purple-400 focus:border-purple-400 compact-input">
+                        </div>
                     </div>
                 </div>
-                </div>
-                <p class="text-[8px] text-slate-500 leading-tight pt-0.5">Keyboard: <b>Enter</b> next field · <b>Shift+Enter</b> previous · <b>Tab</b> as usual</p>
-                <div class="flex justify-end gap-2 pt-1 flex-wrap">
-                    <button type="button" id="peReset" class="px-3 py-1 text-xs border rounded text-gray-700">Reset</button>
-                    <button type="button" id="peDeleteEditedBtn" class="hidden px-3 py-1 text-xs border border-red-300 text-red-700 rounded hover:bg-red-50"><i class="fas fa-trash mr-1"></i>Delete</button>
-                    <button type="submit" id="peSubmit" class="px-4 py-1.5 text-xs font-bold bg-slate-700 text-white rounded hover:bg-slate-800">
-                        <i class="fas fa-save mr-1"></i>Save
+
+                <div class="pr-form-footer">
+                    <button type="submit" id="peSubmit"
+                        class="min-w-[7rem] bg-gradient-to-r from-blue-600 to-blue-700 text-white text-[10px] font-bold uppercase py-1.5 px-4 rounded shadow hover:from-blue-700 hover:to-blue-800 transition tracking-tighter">
+                        <i class="fas fa-save mr-1"></i><span>Save</span>
                     </button>
+                    <button type="button" id="peDeleteEditedBtn"
+                        class="hidden px-2.5 py-1.5 bg-gradient-to-r from-red-600 to-red-700 text-white text-[10px] font-bold rounded hover:from-red-700 hover:to-red-800 shadow-sm"
+                        title="Delete"><i class="fas fa-trash-alt"></i></button>
+                    <button type="button" id="peReset"
+                        class="px-2.5 py-1.5 bg-white border border-gray-300 text-gray-700 text-[10px] font-bold rounded hover:bg-gray-50 shadow-sm"
+                        title="Reset"><i class="fas fa-undo"></i></button>
                 </div>
             </form>
         </div>
 
-        <div class="bg-white rounded-lg shadow border border-gray-200 lg:flex-[0.9]">
-            <div class="bg-slate-100 px-3 py-1.5 border-b border-slate-200 rounded-t-lg">
-                <h2 class="text-xs font-bold text-slate-800"><i class="fas fa-list mr-1"></i> Recent</h2>
+        <div class="bg-white rounded-lg shadow-md border border-gray-200 min-w-0 lg:flex-[1_1_45%] self-start w-full">
+            <div class="bg-blue-50 px-3 py-1.5 border-b border-blue-100 rounded-t-lg">
+                <div class="flex items-center justify-between gap-2">
+                    <h2 class="text-xs font-bold text-blue-800 flex items-center">
+                        <i class="fas fa-list mr-1.5 text-xs"></i> Recent Entries
+                    </h2>
+                    <form method="GET" action="" id="peDateRangeForm" class="flex items-center gap-1.5">
+                        <input type="date" name="start_date" id="peStartDate"
+                            value="<?= htmlspecialchars($start_date) ?>"
+                            class="px-1.5 py-0.5 border border-gray-200 rounded text-[10px] w-24 focus:ring-1 focus:ring-blue-400 focus:border-blue-400 bg-white font-medium"
+                            max="<?= date('Y-m-d') ?>" title="From Date">
+                        <span class="text-gray-400 text-[10px] font-bold">to</span>
+                        <input type="date" name="end_date" id="peEndDate" value="<?= htmlspecialchars($end_date) ?>"
+                            class="px-1.5 py-0.5 border border-gray-200 rounded text-[10px] w-24 focus:ring-1 focus:ring-blue-400 focus:border-blue-400 bg-white font-medium"
+                            max="<?= date('Y-m-d') ?>" title="To Date">
+                        <button type="submit"
+                            class="px-1.5 py-0.5 bg-blue-600 text-white text-[10px] font-bold rounded hover:bg-blue-700 transition shadow-sm"
+                            title="Apply Date Filter">
+                            <i class="fas fa-filter text-[10px]"></i>
+                        </button>
+                    </form>
+                </div>
             </div>
-            <div class="p-2 overflow-x-auto max-h-[28rem] overflow-y-auto">
-                <table class="w-full text-[11px]">
-                    <thead><tr class="border-b text-left text-slate-600">
-                        <th class="py-1">ID / Date</th><th>Party</th><th>Type</th><th>Detail</th><th></th>
-                    </tr></thead>
-                    <tbody>
-                        <?php if ($recent_res && $recent_res->num_rows > 0):
-                            while ($r = $recent_res->fetch_assoc()):
-                                $lbl = $r['booking_type'] ?? '';
-                                $detail = '';
-                                if (strpos($lbl, 'Cash') !== false) {
-                                    $detail = '₹' . number_format((float)$r['payment_amount'], 2) . ' · ' . htmlspecialchars($r['payment_method'] ?? '');
-                                } else {
-                                    $detail = number_format((float)$r['gold_weight'], 3) . 'g @ ' . number_format((float)$r['purity'], 2) . '%';
-                                }
+            <div class="p-2">
+                <div class="ge-txn-scroll" id="peTxnScroll">
+                    <table class="w-full text-sm text-left text-gray-500 ge-txn-table">
+                        <thead class="bg-slate-50 border-b border-slate-100">
+                            <tr>
+                                <th class="py-2 px-1 text-center text-[9px] font-bold text-slate-500 ge-serial-col">#</th>
+                                <th class="py-2 px-2 text-left text-[9px] font-bold text-slate-500 w-16">Id</th>
+                                <th class="py-2 px-2 text-left text-[9px] font-bold text-slate-500 ge-party-col">Party</th>
+                                <th class="py-2 px-2 text-left text-[9px] font-bold text-slate-500">Type</th>
+                                <th class="py-2 px-2 text-left text-[9px] font-bold text-slate-500">Detail</th>
+                                <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500 ge-action-col">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-100">
+                            <?php if (count($recent_list) > 0):
+                            foreach ($recent_list as $index => $r):
+                                $serial = $index + 1;
+                                $lbl = (string) ($r['booking_type'] ?? '');
+                                $detail = pe_entry_detail_line($r);
+                                $is_cash = strpos($lbl, 'Cash') !== false;
                             ?>
-                        <tr class="border-b border-gray-100 hover:bg-slate-50">
-                            <td class="py-1 font-mono font-semibold"><?= htmlspecialchars($r['receipt_id']) ?><br><span class="text-gray-500 font-normal"><?= date('d M Y', strtotime($r['date_of_transaction'])) ?></span></td>
-                            <td><?= htmlspecialchars($r['party_name'] ?? '') ?></td>
-                            <td><span class="text-[10px] bg-amber-100 text-amber-900 px-1 rounded"><?= htmlspecialchars($lbl) ?></span></td>
-                            <td><?= $detail ?></td>
-                            <td class="whitespace-nowrap">
-                                <button type="button" class="text-slate-700 pe-edit hover:underline mr-2" data-id="<?= (int)$r['id'] ?>">Edit</button>
-                                <button type="button" class="text-red-600 pe-del hover:underline" data-id="<?= (int)$r['id'] ?>">Del</button>
-                            </td>
-                        </tr>
-                        <?php endwhile; else: ?>
-                        <tr><td colspan="5" class="py-6 text-center text-gray-500">No entries</td></tr>
-                        <?php endif; ?>
-                    </tbody>
-                </table>
+                            <tr class="ge-txn-row hover:bg-slate-50 transition-colors border-b border-slate-100 last:border-b-0">
+                                <td class="py-1.5 px-1 align-top text-center ge-serial-col">
+                                    <span class="text-[9px] font-bold text-slate-400 tabular-nums"><?= $serial ?></span>
+                                </td>
+                                <td class="py-1.5 px-2 align-top group">
+                                    <div class="text-[10px] font-bold text-blue-600 group-hover:underline truncate flex items-center gap-0.5">
+                                        <span class="truncate">#<?= htmlspecialchars($r['receipt_id']) ?></span>
+                                        <?php if ($is_cash): ?>
+                                            <?php if (strcasecmp(trim((string)($r['payment_method'] ?? 'Cash')), 'Cash') !== 0): ?>
+                                                <i class="fas fa-university text-indigo-600 text-[9px] shrink-0" title="Bank"></i>
+                                            <?php else: ?>
+                                                <i class="fas fa-wallet text-emerald-600 text-[9px] shrink-0" title="Cash"></i>
+                                            <?php endif; ?>
+                                        <?php else: ?>
+                                            <i class="fas fa-coins text-amber-600 text-[9px] shrink-0" title="Gold"></i>
+                                        <?php endif; ?>
+                                    </div>
+                                    <div class="text-[8px] font-semibold text-slate-400 leading-tight tabular-nums whitespace-nowrap">
+                                        <?= date('d M', strtotime($r['date_of_transaction'])) ?> · <?= date('h:i A', strtotime($r['date_of_transaction'])) ?>
+                                    </div>
+                                </td>
+                                <td class="py-1.5 px-2 align-top ge-party-col">
+                                    <div class="text-[10px] font-semibold text-slate-800 truncate uppercase" title="<?= htmlspecialchars($r['party_name'] ?? '') ?>">
+                                        <?= htmlspecialchars($r['party_name'] ?? '—') ?>
+                                    </div>
+                                </td>
+                                <td class="py-1.5 px-2 align-top">
+                                    <span class="text-[7.5px] px-1 py-0.5 rounded font-bold uppercase tracking-tighter <?= pe_kind_badge_class($lbl) ?>">
+                                        <?= htmlspecialchars(pe_kind_short_label($lbl)) ?>
+                                    </span>
+                                </td>
+                                <td class="py-1.5 px-2 align-top">
+                                    <div class="text-[10px] font-semibold text-slate-700 leading-tight truncate" title="<?= htmlspecialchars($detail) ?>">
+                                        <?= htmlspecialchars($detail) ?>
+                                    </div>
+                                </td>
+                                <td class="py-1.5 px-2 align-top ge-action-col whitespace-nowrap">
+                                    <div class="flex items-center justify-end gap-0.5">
+                                        <button type="button" class="ge-action-btn pe-edit text-blue-500 hover:text-blue-700" title="Edit" data-id="<?= (int)$r['id'] ?>">
+                                            <i class="fas fa-edit"></i>
+                                        </button>
+                                        <button type="button" class="ge-action-btn pe-del text-red-500 hover:text-red-700" title="Delete" data-id="<?= (int)$r['id'] ?>">
+                                            <i class="fas fa-trash"></i>
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            <?php endforeach;
+                            else: ?>
+                            <tr>
+                                <td colspan="6" class="text-center py-8 text-gray-500">
+                                    <i class="fas fa-inbox text-2xl mb-2"></i><br>
+                                    No entries found
+                                </td>
+                            </tr>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+                <?php if ($pe_list_has_more): ?>
+                <p class="text-[9px] text-slate-400 text-center mt-1">Showing first <?= count($recent_list) ?> of <?= $pe_total_entries ?> — narrow the date range to see more</p>
+                <?php endif; ?>
             </div>
         </div>
     </div>
@@ -790,6 +1082,13 @@ $page_title = 'Personal expense';
 (function () {
     var BT_TO_KIND = { PE_Take_Cash: 'take_cash', PE_Give_Cash: 'give_cash', PE_Take_Gold: 'take_gold', PE_Give_Gold: 'give_gold' };
     var selectedPePartyName = '';
+    var peSaveBtnClass = 'min-w-[7rem] bg-gradient-to-r from-blue-600 to-blue-700 text-white text-[10px] font-bold uppercase py-1.5 px-4 rounded shadow hover:from-blue-700 hover:to-blue-800 transition tracking-tighter';
+    var peDefaultFineGold = <?= json_encode($pe_default_fine_gold ? [
+        'stock_name' => (string) ($pe_default_fine_gold['stock_name'] ?? ''),
+        'purity' => (float) ($pe_default_fine_gold['purity'] ?? 0),
+    ] : null, JSON_UNESCAPED_UNICODE) ?>;
+    var pePartyListVisible = false;
+    var pePartyCurrentIndex = -1;
 
     function inr(n) {
         var x = parseFloat(n);
@@ -839,16 +1138,56 @@ $page_title = 'Personal expense';
         var term = (searchTerm || '').trim();
         if (!term) return;
         var row = document.createElement('div');
-        row.className = 'px-3 py-2 hover:bg-emerald-50 cursor-pointer transition-colors border-t-2 border-emerald-200 bg-emerald-50/80';
+        row.className = 'px-3 py-2 hover:bg-emerald-50 cursor-pointer transition-colors border-t-2 border-emerald-200 bg-emerald-50/80 party-item';
+        row.setAttribute('data-create-new', '1');
         row.innerHTML = '<div class="flex items-center gap-2"><i class="fas fa-plus-circle text-emerald-600"></i>' +
             '<div class="font-semibold text-[11px] text-emerald-800">Create new party &quot;' + escPePartyHtml(term) + '&quot;</div></div>';
         row.addEventListener('mousedown', function (e) { e.preventDefault(); });
         row.addEventListener('click', function (e) {
             e.stopPropagation();
             $(partyListEl).addClass('hidden');
+            pePartyListVisible = false;
+            pePartyCurrentIndex = -1;
             showAddPartyModal(term);
         });
         partyListEl.appendChild(row);
+    }
+    function selectPeParty(pid, pnm) {
+        pid = parseInt(pid, 10) || 0;
+        pnm = pnm || '';
+        $('#pePartyName').val(pnm);
+        $('#pePartyId').val(pid > 0 ? String(pid) : '');
+        selectedPePartyName = pnm;
+        $('#pePartyList').addClass('hidden');
+        pePartyListVisible = false;
+        pePartyCurrentIndex = -1;
+        if (window.KeyboardNavigation && typeof window.KeyboardNavigation.clearValidationError === 'function') {
+            window.KeyboardNavigation.clearValidationError('pePartyName');
+        }
+        if (pid > 0) {
+            $.post('', { action: 'get_party_info', party_id: pid }, function (info) { renderPePartyInfo(info); }, 'json');
+        } else {
+            $('#pePartyInfoSection').addClass('hidden');
+        }
+    }
+    function updatePePartyHighlight() {
+        var partyItems = document.querySelectorAll('#pePartyList .party-item');
+        partyItems.forEach(function (item, index) {
+            if (index === pePartyCurrentIndex && pePartyCurrentIndex >= 0) {
+                item.classList.add('bg-amber-100', 'border-l-4', 'border-amber-400');
+                item.classList.remove('hover:bg-amber-50/90', 'hover:bg-emerald-50', 'bg-emerald-50/80');
+            } else {
+                item.classList.remove('bg-amber-100', 'border-l-4', 'border-amber-400');
+                if (item.getAttribute('data-create-new')) {
+                    item.classList.add('hover:bg-emerald-50', 'bg-emerald-50/80');
+                } else {
+                    item.classList.add('hover:bg-amber-50/90');
+                }
+            }
+        });
+        if (pePartyCurrentIndex >= 0 && pePartyCurrentIndex < partyItems.length) {
+            partyItems[pePartyCurrentIndex].scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
     }
     function peParseNotes(narr) {
         var notes = '';
@@ -864,13 +1203,48 @@ $page_title = 'Personal expense';
         }
         return { notes: notes, stock: stock };
     }
+    function applyPeStockPurityFromSelect() {
+        var p = $('#peStockName').find(':selected').data('purity');
+        if (p) { $('#pePurity').val(String(p)); }
+    }
+    function applyPeDefaultFineGoldStock(force) {
+        if ($('#peEditTransactionId').val() && !force) { return; }
+        var $st = $('#peStockName');
+        if (!force && $st.val()) { return; }
+        var $opt = $st.find('option[data-fine-gold="1"]').first();
+        if (!$opt.length && peDefaultFineGold && peDefaultFineGold.stock_name) {
+            $opt = $st.find('option').filter(function () {
+                return $(this).val() === peDefaultFineGold.stock_name;
+            }).first();
+        }
+        if (!$opt.length) {
+            $opt = $st.find('option').filter(function () {
+                var v = String($(this).val() || '').toLowerCase();
+                return v && v.indexOf('fine') >= 0 && v.indexOf('silver') < 0;
+            }).first();
+        }
+        if ($opt.length) {
+            $st.val($opt.val());
+            applyPeStockPurityFromSelect();
+        } else if (peDefaultFineGold && peDefaultFineGold.purity) {
+            $('#pePurity').val(String(peDefaultFineGold.purity));
+        }
+    }
     function refreshKindUi() {
         var k = $('#peKind').val();
         var cash = (k === 'take_cash' || k === 'give_cash');
         $('#peCashBlock').toggleClass('hidden', !cash);
         $('#peGoldBlock').toggleClass('hidden', cash);
-        if (cash) { $('#peGoldW, #pePurity').prop('required', false); $('#peCashAmt').prop('required', true); }
-        else { $('#peCashAmt').prop('required', false); $('#peGoldW, #pePurity').prop('required', true); }
+        if (cash) {
+            $('#peGoldW, #pePurity').prop('required', false);
+            $('#peCashAmt').prop('required', true);
+        } else {
+            $('#peCashAmt').prop('required', false);
+            $('#peGoldW, #pePurity').prop('required', true);
+            if (k === 'give_gold' && !$('#peEditTransactionId').val()) {
+                applyPeDefaultFineGoldStock(true);
+            }
+        }
     }
     function genId() {
         $.post('', { action: 'generate_pe_receipt_id' }, function (res) {
@@ -890,13 +1264,13 @@ $page_title = 'Personal expense';
         $('#peEditModeIndicator').addClass('hidden');
         $('#peDeleteEditedBtn').addClass('hidden');
         $('#peFormCard').css('border', '');
-        $('#peSubmit').html('<i class="fas fa-save mr-1"></i>Save').removeClass('bg-orange-600 hover:bg-orange-700').addClass('bg-slate-700 hover:bg-slate-800');
+        $('#peSubmit').html('<i class="fas fa-save mr-1"></i><span>Save</span>').attr('class', peSaveBtnClass);
     }
     function enterEditMode() {
         $('#peEditModeIndicator').removeClass('hidden');
         $('#peDeleteEditedBtn').removeClass('hidden');
         $('#peFormCard').css('border', '2px solid #f97316');
-        $('#peSubmit').html('<i class="fas fa-save mr-1"></i>Update').removeClass('bg-slate-700 hover:bg-slate-800').addClass('bg-orange-600 hover:bg-orange-700');
+        $('#peSubmit').html('<i class="fas fa-save mr-1"></i><span>Update</span>').attr('class', peSaveBtnClass);
     }
     function loadPeForEdit(tid) {
         $.post('', { action: 'get_pe_details', transaction_id: tid }, function (res) {
@@ -1029,7 +1403,7 @@ $page_title = 'Personal expense';
         if (typeof KeyboardNavigationGeneric !== 'undefined') {
             KeyboardNavigationGeneric.init({
                 formId: 'peForm',
-                fieldOrder: ['peReceiptId', 'date_of_transaction', 'pePartyName', 'pe_kind', 'cash_amount', 'payment_method', 'gold_weight', 'purity', 'gold_rate', 'stock_name', 'narration'],
+                fieldOrder: ['peReceiptId', 'date_of_transaction', 'pePartyName', 'pe_kind', 'stock_name', 'gold_weight', 'purity', 'gold_rate', 'cash_amount', 'payment_method', 'narration'],
                 skipFields: [],
                 submitButtonId: 'peSubmit',
                 formName: 'personal_expense'
@@ -1037,25 +1411,72 @@ $page_title = 'Personal expense';
             window.KeyboardNavigation = KeyboardNavigationGeneric;
         }
         $('#peKind').on('change', refreshKindUi);
-        $('#peStockName').on('change', function () {
-            var p = $(this).find(':selected').data('purity');
-            if (p) { $('#pePurity').val(String(p)); }
-        });
+        $('#peStockName').on('change', applyPeStockPurityFromSelect);
         $('#showPeListBtn, #peReceiptId').on('click', function (e) {
             e.preventDefault();
             showPeReceiptList();
         });
         $(document).on('click', function (e) {
             if (!$(e.target).closest('#peReceiptList, #showPeListBtn, #peReceiptId').length) { $('#peReceiptList').addClass('hidden'); }
-            if (!$(e.target).closest('#pePartyName, #pePartyList').length) { $('#pePartyList').addClass('hidden'); }
+            if (!$(e.target).closest('#pePartyName, #pePartyList, #peAddPartyBtn').length && pePartyListVisible) {
+                $('#pePartyList').addClass('hidden');
+                pePartyListVisible = false;
+                pePartyCurrentIndex = -1;
+            }
         });
         $('#peAddPartyBtn').on('click', function (e) {
             e.preventDefault();
             showAddPartyModal(($('#pePartyName').val() || '').trim());
         });
         var peTimer;
+        $('#pePartyName').on('keydown', function (e) {
+            var partyItems = document.querySelectorAll('#pePartyList .party-item');
+            if (pePartyListVisible && partyItems.length > 0) {
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    pePartyCurrentIndex = pePartyCurrentIndex < 0 ? 0 : Math.min(pePartyCurrentIndex + 1, partyItems.length - 1);
+                    updatePePartyHighlight();
+                    return;
+                }
+                if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    pePartyCurrentIndex = pePartyCurrentIndex <= 0 ? -1 : Math.max(pePartyCurrentIndex - 1, 0);
+                    updatePePartyHighlight();
+                    return;
+                }
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    var idx = pePartyCurrentIndex >= 0 ? pePartyCurrentIndex : 0;
+                    var selectedItem = partyItems[idx];
+                    if (selectedItem) {
+                        if (selectedItem.getAttribute('data-create-new')) {
+                            selectedItem.click();
+                            return;
+                        }
+                        selectPeParty(selectedItem.getAttribute('data-id'), selectedItem.getAttribute('data-name'));
+                        setTimeout(function () {
+                            var next = document.getElementById('peKind');
+                            if (next) { next.focus(); }
+                        }, 50);
+                    }
+                    return;
+                }
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    $('#pePartyList').addClass('hidden');
+                    pePartyListVisible = false;
+                    pePartyCurrentIndex = -1;
+                    return;
+                }
+            }
+        });
         $('#pePartyName').on('input', function () {
             clearTimeout(peTimer);
+            pePartyCurrentIndex = -1;
             var term = $(this).val();
             if (term !== selectedPePartyName) {
                 selectedPePartyName = '';
@@ -1064,6 +1485,7 @@ $page_title = 'Personal expense';
             var v = term.trim();
             if (v.length < 1) {
                 $('#pePartyList').empty().addClass('hidden');
+                pePartyListVisible = false;
                 $('#pePartyInfoSection').addClass('hidden');
                 return;
             }
@@ -1071,9 +1493,11 @@ $page_title = 'Personal expense';
                 $.post('', { action: 'search_parties', term: v }, function (rows) {
                     var listEl = document.getElementById('pePartyList');
                     var $l = $(listEl).empty();
+                    pePartyCurrentIndex = -1;
                     if (!rows || !rows.length) {
                         appendPeCreatePartyRow(listEl, v);
                         $l.removeClass('hidden');
+                        pePartyListVisible = true;
                         return;
                     }
                     rows.forEach(function (party) {
@@ -1090,7 +1514,7 @@ $page_title = 'Personal expense';
                             ? '<div class="text-[10px] text-slate-500 font-bold tracking-tight"><i class="fas fa-compact-disc mr-1 opacity-70"></i>' + sb.toFixed(3) + 'g Ag</div>'
                             : '';
                         var item = document.createElement('div');
-                        item.className = 'px-3 py-2 hover:bg-amber-50/90 cursor-pointer border-b border-gray-100 last:border-b-0 transition-colors pe-party-item';
+                        item.className = 'px-3 py-2 hover:bg-amber-50/90 cursor-pointer border-b border-gray-100 last:border-b-0 transition-colors party-item';
                         item.setAttribute('data-id', party.id || '');
                         item.setAttribute('data-name', party.party_name || '');
                         item.innerHTML =
@@ -1105,23 +1529,13 @@ $page_title = 'Personal expense';
                         item.addEventListener('mousedown', function (e) { e.preventDefault(); });
                         item.addEventListener('click', function (e) {
                             e.stopPropagation();
-                            var pid = parseInt(item.getAttribute('data-id'), 10) || 0;
-                            var pnm = item.getAttribute('data-name') || '';
-                            $('#pePartyName').val(pnm);
-                            $('#pePartyId').val(pid > 0 ? String(pid) : '');
-                            selectedPePartyName = pnm;
-                            $l.addClass('hidden');
-                            if (window.KeyboardNavigation && typeof window.KeyboardNavigation.clearValidationError === 'function') {
-                                window.KeyboardNavigation.clearValidationError('pePartyName');
-                            }
-                            if (pid > 0) {
-                                $.post('', { action: 'get_party_info', party_id: pid }, function (info) { renderPePartyInfo(info); }, 'json');
-                            } else { $('#pePartyInfoSection').addClass('hidden'); }
+                            selectPeParty(item.getAttribute('data-id'), item.getAttribute('data-name'));
                         });
                         listEl.appendChild(item);
                     });
                     appendPeCreatePartyRow(listEl, v);
                     $l.removeClass('hidden');
+                    pePartyListVisible = true;
                 }, 'json');
             }, 200);
         });
@@ -1169,6 +1583,25 @@ $page_title = 'Personal expense';
                     else { Swal.fire('Error', res.message, 'error'); }
                 }, 'json');
             });
+        });
+        $('#peStartDate, #peEndDate').on('change', function () {
+            var startDate = new Date($('#peStartDate').val());
+            var endDate = new Date($('#peEndDate').val());
+            if (startDate > endDate) {
+                Swal.fire({
+                    icon: 'warning',
+                    title: 'Invalid Date Range',
+                    text: 'End date must be greater than or equal to start date',
+                    confirmButtonColor: '#3085d6',
+                    timer: 2000,
+                    showConfirmButton: false
+                });
+                if ($(this).attr('id') === 'peStartDate') {
+                    $('#peEndDate').val($('#peStartDate').val());
+                } else {
+                    $('#peStartDate').val($('#peEndDate').val());
+                }
+            }
         });
     });
 })();

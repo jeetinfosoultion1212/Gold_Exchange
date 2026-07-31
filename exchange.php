@@ -208,6 +208,183 @@ function ge_weighted_purity_from_received_items(array $items): float
     return $totalWeight > 0 ? round($weightedSum / $totalWeight, 2) : 0.0;
 }
 
+/** Base SQL for exchange transaction lists (recent sidebar + AJAX). */
+function ge_exchange_list_base_sql(): string
+{
+    return "SELECT t.*, p.party_name,
+        (SELECT CASE WHEN SUM(ei.weight) > 0
+             THEN ROUND(SUM(ei.weight * ei.purity) / SUM(ei.weight), 2)
+             ELSE NULL END
+         FROM exchange_items ei
+         WHERE ei.transaction_id = t.id AND ei.company_id = t.company_id AND ei.item_type = 'received'
+        ) AS item_purity,
+        (SELECT GROUP_CONCAT(CONCAT(COALESCE(ei.weight, 0), ':', COALESCE(ei.purity, 0), ':', COALESCE(ei.fine_weight, 0)) ORDER BY ei.id SEPARATOR '|')
+         FROM exchange_items ei
+         WHERE ei.transaction_id = t.id AND ei.company_id = t.company_id AND ei.item_type = 'received'
+        ) AS items_concat
+        FROM transactions t
+        LEFT JOIN parties p ON t.party_id = p.id
+        WHERE t.company_id = ? AND DATE(t.date_of_transaction) BETWEEN ? AND ? AND t.transaction_type = 'Exchange'";
+}
+
+/** Parses the "weight:purity:fine|weight:purity:fine" concat into a list of received-item rows. */
+function ge_parse_exchange_items_concat(?string $concat): array
+{
+    $items = [];
+    if ($concat === null || $concat === '') {
+        return $items;
+    }
+    foreach (explode('|', $concat) as $chunk) {
+        $parts = explode(':', $chunk);
+        if (count($parts) < 3) {
+            continue;
+        }
+        $items[] = [
+            'weight' => floatval($parts[0]),
+            'purity' => floatval($parts[1]),
+            'fine' => floatval($parts[2]),
+        ];
+    }
+    return $items;
+}
+
+function ge_count_exchange_transactions(mysqli $conn, int $company_id, string $start_date, string $end_date, ?string $search = null): int
+{
+    $sql = "SELECT COUNT(*) AS cnt FROM transactions t
+        LEFT JOIN parties p ON t.party_id = p.id
+        WHERE t.company_id = ? AND DATE(t.date_of_transaction) BETWEEN ? AND ? AND t.transaction_type = 'Exchange'";
+    if ($search !== null && $search !== '') {
+        $sql .= " AND (p.party_name LIKE ? OR t.receipt_id LIKE ?)";
+    }
+    $stmt = $conn->prepare($sql);
+    if (!$stmt) {
+        return 0;
+    }
+    if ($search !== null && $search !== '') {
+        $like = '%' . $search . '%';
+        $stmt->bind_param('isss', $company_id, $start_date, $end_date, $like, $like);
+    } else {
+        $stmt->bind_param('iss', $company_id, $start_date, $end_date);
+    }
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    return (int) ($row['cnt'] ?? 0);
+}
+
+function ge_fetch_exchange_transactions(
+    mysqli $conn,
+    int $company_id,
+    string $start_date,
+    string $end_date,
+    ?string $search,
+    int $offset,
+    int $limit,
+    string $gold_rate_unit
+): array {
+    $sql = ge_exchange_list_base_sql();
+    if ($search !== null && $search !== '') {
+        $sql .= " AND (p.party_name LIKE ? OR t.receipt_id LIKE ?)";
+    }
+    $sql .= " ORDER BY t.date_of_transaction DESC, t.id DESC LIMIT ? OFFSET ?";
+    $stmt = $conn->prepare($sql);
+    if (!$stmt) {
+        return [];
+    }
+    if ($search !== null && $search !== '') {
+        $like = '%' . $search . '%';
+        $stmt->bind_param('isssii', $company_id, $start_date, $end_date, $like, $like, $limit, $offset);
+    } else {
+        $stmt->bind_param('issii', $company_id, $start_date, $end_date, $limit, $offset);
+    }
+    $stmt->execute();
+    return $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+}
+
+function ge_map_exchange_list_row(array $row, string $gold_rate_unit): array
+{
+    gold_rate_apply_display_to_row($row, $gold_rate_unit);
+    $display_purity = ($row['item_purity'] !== null && $row['item_purity'] !== '')
+        ? floatval($row['item_purity'])
+        : floatval($row['purity']);
+    return [
+        'id' => (int) $row['id'],
+        'receipt_id' => $row['receipt_id'],
+        'party_name' => $row['party_name'] ?? '',
+        'date_of_transaction' => $row['date_of_transaction'],
+        'received_weight' => floatval($row['received_weight']),
+        'fine_weight' => floatval($row['fine_weight']),
+        'delivered_weight' => floatval($row['delivered_weight']),
+        'difference_weight' => floatval($row['difference_weight']),
+        'amount' => floatval($row['amount']),
+        'payment_amount' => floatval($row['payment_amount']),
+        'payment_type' => $row['payment_type'] ?? '',
+        'exchange_material' => $row['exchange_material'] ?? 'Gold',
+        'display_purity' => $display_purity,
+        'rate_display' => gold_rate_to_display(floatval($row['rate']), $gold_rate_unit),
+        'items' => ge_parse_exchange_items_concat($row['items_concat'] ?? null),
+    ];
+}
+
+function ge_count_exchange_receipts(mysqli $conn, int $company_id, string $term = ''): int
+{
+    $sql = "SELECT COUNT(*) AS cnt FROM transactions t
+        WHERE t.company_id = ? AND t.transaction_type = 'Exchange'";
+    if ($term !== '') {
+        $sql .= " AND t.receipt_id LIKE ?";
+    }
+    $stmt = $conn->prepare($sql);
+    if (!$stmt) {
+        return 0;
+    }
+    if ($term !== '') {
+        $like = $term . '%';
+        $stmt->bind_param('is', $company_id, $like);
+    } else {
+        $stmt->bind_param('i', $company_id);
+    }
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    return (int) ($row['cnt'] ?? 0);
+}
+
+function ge_fetch_exchange_receipts(mysqli $conn, int $company_id, string $term, int $offset, int $limit): array
+{
+    $sql = "SELECT t.receipt_id, t.date_of_transaction, t.received_weight, t.amount,
+                   t.payment_type, t.exchange_material, p.party_name
+            FROM transactions t
+            LEFT JOIN parties p ON t.party_id = p.id
+            WHERE t.company_id = ? AND t.transaction_type = 'Exchange'";
+    if ($term !== '') {
+        $sql .= " AND t.receipt_id LIKE ?";
+    }
+    $sql .= " ORDER BY t.id DESC LIMIT ? OFFSET ?";
+    $stmt = $conn->prepare($sql);
+    if (!$stmt) {
+        return [];
+    }
+    if ($term !== '') {
+        $like = $term . '%';
+        $stmt->bind_param('isii', $company_id, $like, $limit, $offset);
+    } else {
+        $stmt->bind_param('iii', $company_id, $limit, $offset);
+    }
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $items = [];
+    while ($row = $result->fetch_assoc()) {
+        $items[] = [
+            'receipt_id' => $row['receipt_id'],
+            'party_name' => $row['party_name'] ?? 'Unknown',
+            'date_of_transaction' => $row['date_of_transaction'],
+            'received_weight' => floatval($row['received_weight']),
+            'amount' => floatval($row['amount']),
+            'payment_type' => $row['payment_type'] ?? '',
+            'exchange_material' => $row['exchange_material'] ?? 'Gold',
+        ];
+    }
+    return $items;
+}
+
 // Get company_id from session
 $company_id = $_SESSION['company_id'];
 $gold_rate_unit = gold_rate_get_unit($conn, $company_id);
@@ -1134,45 +1311,76 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ]);
                 exit;
 
-            case 'search_receipt_ids':
-                $search = $conn->real_escape_string($_POST['term'] ?? '');
-
-                // If search is empty, show all recent receipts
-                if (empty($search)) {
-                    $sql = "SELECT DISTINCT receipt_id, date_of_transaction, party_id
-                            FROM transactions 
-                            WHERE company_id = ? AND transaction_type = 'Exchange'
-                            ORDER BY id DESC LIMIT 10";
-                    $stmt = $conn->prepare($sql);
-                    $stmt->bind_param('i', $company_id);
-                } else {
-                    $sql = "SELECT DISTINCT receipt_id, date_of_transaction, party_id
-                            FROM transactions 
-                            WHERE company_id = ? AND transaction_type = 'Exchange' 
-                            AND receipt_id LIKE ?
-                            ORDER BY id DESC LIMIT 10";
-                    $stmt = $conn->prepare($sql);
-                    $searchTerm = $search . '%';
-                    $stmt->bind_param('is', $company_id, $searchTerm);
+            case 'get_exchange_list':
+                try {
+                    $list_start = $_POST['start_date'] ?? date('Y-m-d');
+                    $list_end = $_POST['end_date'] ?? date('Y-m-d');
+                    $offset = max(0, (int) ($_POST['offset'] ?? 0));
+                    $limit = min(100, max(1, (int) ($_POST['limit'] ?? 50)));
+                    $list_search = trim($_POST['search'] ?? '');
+                    $search_param = $list_search !== '' ? $list_search : null;
+                    $total = ge_count_exchange_transactions($conn, $company_id, $list_start, $list_end, $search_param);
+                    $rows = ge_fetch_exchange_transactions(
+                        $conn,
+                        $company_id,
+                        $list_start,
+                        $list_end,
+                        $search_param,
+                        $offset,
+                        $limit,
+                        $gold_rate_unit
+                    );
+                    $items = array_map(
+                        fn($row) => ge_map_exchange_list_row($row, $gold_rate_unit),
+                        $rows
+                    );
+                    echo json_encode([
+                        'status' => 'success',
+                        'items' => $items,
+                        'total' => $total,
+                        'offset' => $offset,
+                        'limit' => $limit,
+                        'has_more' => ($offset + count($items)) < $total,
+                    ]);
+                } catch (Exception $e) {
+                    echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
                 }
+                exit;
 
-                $stmt->execute();
-                $result = $stmt->get_result();
+            case 'get_exchange_receipt_list':
+                try {
+                    $term = trim($_POST['term'] ?? '');
+                    $offset = max(0, (int) ($_POST['offset'] ?? 0));
+                    $limit = min(100, max(1, (int) ($_POST['limit'] ?? 100)));
+                    $total = ge_count_exchange_receipts($conn, $company_id, $term);
+                    $items = ge_fetch_exchange_receipts($conn, $company_id, $term, $offset, $limit);
+                    echo json_encode([
+                        'status' => 'success',
+                        'items' => $items,
+                        'total' => $total,
+                        'offset' => $offset,
+                        'limit' => $limit,
+                        'has_more' => ($offset + count($items)) < $total,
+                    ]);
+                } catch (Exception $e) {
+                    echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
+                }
+                exit;
 
+            case 'search_receipt_ids':
+                $search = trim($_POST['term'] ?? '');
+                $offset = max(0, (int) ($_POST['offset'] ?? 0));
+                $limit = min(100, max(1, (int) ($_POST['limit'] ?? 100)));
+                $items = ge_fetch_exchange_receipts($conn, $company_id, $search, $offset, $limit);
                 $receipts = [];
-                while ($row = $result->fetch_assoc()) {
-                    // Get party name
-                    $party_sql = "SELECT party_name FROM parties WHERE id = ?";
-                    $party_stmt = $conn->prepare($party_sql);
-                    $party_stmt->bind_param('i', $row['party_id']);
-                    $party_stmt->execute();
-                    $party_result = $party_stmt->get_result();
-                    $party_name = $party_result->num_rows > 0 ? $party_result->fetch_assoc()['party_name'] : 'Unknown';
-
+                foreach ($items as $row) {
                     $receipts[] = [
                         'receipt_id' => $row['receipt_id'],
                         'date' => date('d M Y', strtotime($row['date_of_transaction'])),
-                        'party_name' => $party_name
+                        'party_name' => $row['party_name'],
+                        'received_weight' => $row['received_weight'],
+                        'amount' => $row['amount'],
+                        'exchange_material' => $row['exchange_material'],
                     ];
                 }
                 echo json_encode($receipts);
@@ -1353,38 +1561,24 @@ if ($cash_stmt) {
     $stats['cash_balance'] = 0;
 }
 
-// Get search parameter
-$search = isset($_GET['search']) ? "%" . $conn->real_escape_string($_GET['search']) . "%" : null;
+// Get search parameter (optional GET filter)
+$search_raw = isset($_GET['search']) ? trim($_GET['search']) : '';
+$search_param = $search_raw !== '' ? $search_raw : null;
+$exchange_list_initial = 100;
+$exchange_list_page_size = 50;
 
-// Transactions query with search and date filter (shows ALL matching transactions for the selected range - no pagination cap)
-$transactions_sql = "SELECT t.*, p.party_name,
-    (SELECT CASE WHEN SUM(ei.weight) > 0
-         THEN ROUND(SUM(ei.weight * ei.purity) / SUM(ei.weight), 2)
-         ELSE NULL END
-     FROM exchange_items ei
-     WHERE ei.transaction_id = t.id AND ei.company_id = t.company_id AND ei.item_type = 'received'
-    ) AS item_purity
-    FROM transactions t 
-    LEFT JOIN parties p ON t.party_id = p.id 
-    WHERE t.company_id = ? AND DATE(t.date_of_transaction) BETWEEN ? AND ? AND t.transaction_type = 'Exchange'";
-if ($search) {
-    $transactions_sql .= " AND (p.party_name LIKE ? OR t.receipt_id LIKE ?)";
-}
-$transactions_sql .= " ORDER BY t.date_of_transaction DESC, t.id DESC";
-
-$transactions_stmt = $conn->prepare($transactions_sql);
-if (!$transactions_stmt) {
-    die("SQL Error in transactions query: " . $conn->error . "<br><br>Query: " . $transactions_sql);
-}
-if ($search) {
-    $transactions_stmt->bind_param("isss", $company_id, $start_date, $end_date, $search, $search);
-} else {
-    $transactions_stmt->bind_param("iss", $company_id, $start_date, $end_date);
-}
-$transactions_stmt->execute();
-$transactions_result = $transactions_stmt->get_result();
-$transactions = $transactions_result->fetch_all(MYSQLI_ASSOC);
-$total_transactions = count($transactions);
+$total_transactions = ge_count_exchange_transactions($conn, $company_id, $start_date, $end_date, $search_param);
+$transactions = ge_fetch_exchange_transactions(
+    $conn,
+    $company_id,
+    $start_date,
+    $end_date,
+    $search_param,
+    0,
+    $exchange_list_initial,
+    $gold_rate_unit
+);
+$exchange_list_has_more = $total_transactions > count($transactions);
 ?>
 
 <!DOCTYPE html>
@@ -1613,9 +1807,10 @@ $total_transactions = count($transactions);
         }
 
         .ge-txn-table .ge-action-col {
-            width: 3.25rem;
-            min-width: 3.25rem;
-            padding-right: 0.35rem !important;
+            width: 3rem;
+            min-width: 3rem;
+            padding-left: 0.2rem !important;
+            padding-right: 0.3rem !important;
         }
 
         /* Keep the Recent Transactions list within a fixed viewport height and scroll internally
@@ -1630,7 +1825,36 @@ $total_transactions = count($transactions);
         .ge-txn-scroll thead th {
             position: sticky;
             top: 0;
-            z-index: 5;
+            z-index: 10;
+            background-color: #f8fafc;
+            box-shadow: 0 1px 0 #e2e8f0;
+        }
+
+        .ge-txn-table thead th {
+            white-space: nowrap;
+        }
+
+        .ge-txn-table .ge-serial-col {
+            width: 1.75rem;
+            min-width: 1.75rem;
+            padding-left: 0.35rem !important;
+            padding-right: 0.25rem !important;
+            text-align: center;
+        }
+
+        .ge-txn-table .ge-party-col {
+            width: 5.75rem;
+            max-width: 5.75rem;
+            padding-left: 0.3rem !important;
+            padding-right: 0.3rem !important;
+        }
+
+        /* Tighten the horizontal gap between every other column so the extra
+           room freed up here can go to the Party column above instead. */
+        .ge-txn-table td,
+        .ge-txn-table th {
+            padding-left: 0.35rem;
+            padding-right: 0.35rem;
         }
 
         .ge-txn-scroll::-webkit-scrollbar {
@@ -1829,11 +2053,18 @@ $total_transactions = count($transactions);
                                     <i class="fas fa-hashtag text-xs"></i>
                                 </span>
                                 <input type="text"
-                                    class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-blue-400 focus:border-blue-400 compact-input"
-                                    name="receipt_id" id="receiptId" placeholder="Search..." autocomplete="off">
+                                    class="block w-full pl-7 pr-8 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-blue-400 focus:border-blue-400 compact-input cursor-pointer"
+                                    name="receipt_id" id="receiptId" placeholder="Auto..." autocomplete="off" readonly
+                                    title="Click for recent exchanges to load">
+                                <button type="button"
+                                    class="absolute right-1 top-1/2 -translate-y-1/2 text-gray-400 hover:text-blue-600 p-0.5"
+                                    id="showReceiptListBtn" title="Recent exchanges / Load to edit"
+                                    aria-label="Open exchange list">
+                                    <i class="fas fa-history text-xs"></i>
+                                </button>
                             </div>
                             <div id="receiptList"
-                                class="hidden absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-xl max-h-60 overflow-y-auto">
+                                class="hidden absolute z-[60] mt-1 bg-white border border-gray-200 rounded-md shadow-lg max-h-72 overflow-y-auto w-[min(100%,20rem)] left-0 text-[9px] leading-tight">
                             </div>
                         </div>
 
@@ -1932,8 +2163,8 @@ $total_transactions = count($transactions);
                                             </td>
                                             <td class="px-2 py-1 border-b">
                                                 <input type="number" step="0.001"
-                                                    class="w-full px-2 py-1 text-xs font-bold text-gray-600 bg-gray-50 border border-gray-200 rounded received-fine cursor-not-allowed"
-                                                    readonly>
+                                                    class="w-full px-2 py-1 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-emerald-400 focus:border-emerald-400 received-fine"
+                                                    placeholder="0.000">
                                             </td>
                                             <td class="px-2 py-1 border-b text-center w-10">
                                                 <button type="button" onclick="removeReceivedItem(this)"
@@ -2174,12 +2405,13 @@ $total_transactions = count($transactions);
                     </div>
                 </div>
                 <div class="p-2">
-                    <div class="ge-txn-scroll">
+                    <div class="ge-txn-scroll" id="geTxnScroll">
                         <table class="w-full text-sm text-left text-gray-500 ge-txn-table">
                             <thead class="bg-slate-50 border-b border-slate-100">
                                 <tr>
+                                    <th class="py-2 px-1 text-center text-[9px] font-bold text-slate-500 ge-serial-col">#</th>
                                     <th class="py-2 px-2 text-left text-[9px] font-bold text-slate-500 w-16">Id</th>
-                                    <th class="py-2 px-2 text-left text-[9px] font-bold text-slate-500">Party</th>
+                                    <th class="py-2 px-2 text-left text-[9px] font-bold text-slate-500 ge-party-col">Party</th>
                                     <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500">Rcv.Wt</th>
                                     <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500">Fine Wt</th>
                                     <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500">Issue Wt</th>
@@ -2197,6 +2429,8 @@ $total_transactions = count($transactions);
                                         $display_purity = ($t['item_purity'] !== null && $t['item_purity'] !== '')
                                             ? floatval($t['item_purity'])
                                             : floatval($t['purity']);
+                                        $row_items = ge_parse_exchange_items_concat($t['items_concat'] ?? null);
+                                        $is_multi_item_row = count($row_items) > 1;
 
                                         // Payment Column Logic (Shows ACTUAL Paid Amount)
                                         $paidAmount = $t['payment_amount'];
@@ -2214,8 +2448,13 @@ $total_transactions = count($transactions);
                                         $diffColor = $t['difference_weight'] > 0 ? 'text-green-600' : ($t['difference_weight'] < 0 ? 'text-red-600' : 'text-gray-600');
                                         ?>
                                         <tr
-                                            class="hover:bg-slate-50 transition-colors border-b border-slate-100 last:border-b-0">
-                                            <!-- ID & Date -->
+                                            class="ge-txn-row hover:bg-slate-50 transition-colors border-b border-slate-100 last:border-b-0">
+                                            <!-- Serial -->
+                                            <td class="py-1.5 px-1 align-top text-center ge-serial-col">
+                                                <span class="text-[9px] font-bold text-slate-400 tabular-nums"><?= $serial ?></span>
+                                            </td>
+
+                                            <!-- ID, Date & Time -->
                                             <td class="py-1.5 px-2 align-top group">
                                                 <div
                                                     class="text-[10px] font-bold text-blue-600 group-hover:underline truncate flex items-center gap-0.5">
@@ -2228,33 +2467,59 @@ $total_transactions = count($transactions);
                                                             title="Gold (vault issue)" aria-hidden="true"></i>
                                                     <?php endif; ?>
                                                 </div>
-                                                <div class="text-[8px] font-bold text-slate-400 uppercase leading-tight">
-                                                    <?= date('d M', strtotime($t['date_of_transaction'])) ?></div>
+                                                <div class="text-[8px] font-semibold text-slate-400 leading-tight tabular-nums whitespace-nowrap">
+                                                    <?= date('d M', strtotime($t['date_of_transaction'])) ?> · <?= date('h:i A', strtotime($t['date_of_transaction'])) ?>
+                                                </div>
                                             </td>
 
                                             <!-- Party -->
-                                            <td class="py-1.5 px-2 align-top">
+                                            <td class="py-1.5 px-2 align-top ge-party-col">
                                                 <div
-                                                    class="text-[10px] font-semibold text-slate-800 truncate max-w-[80px] uppercase">
+                                                    class="text-[10px] font-semibold text-slate-800 truncate uppercase"
+                                                    title="<?= htmlspecialchars($t['party_name']) ?>">
                                                     <?= htmlspecialchars($t['party_name']) ?></div>
                                             </td>
 
                                             <!-- Weight & Purity -->
                                             <td class="py-1.5 px-2 align-top text-right">
-                                                <div class="text-[10px] font-bold text-slate-700 leading-none">
-                                                    <?= number_format($t['received_weight'], 3) ?><span
-                                                        class="text-[8px] font-normal ml-0.5">g</span></div>
-                                                <div class="text-[8px] font-bold text-slate-400 uppercase mt-0.5">
-                                                    <?= number_format($display_purity, 2) ?>%</div>
+                                                <?php if ($is_multi_item_row): ?>
+                                                    <div class="space-y-0.5">
+                                                        <?php foreach ($row_items as $ri): ?>
+                                                            <div class="flex items-baseline justify-end gap-1 whitespace-nowrap">
+                                                                <span class="text-[9px] font-bold text-slate-700 leading-none"><?= number_format($ri['weight'], 3) ?><span
+                                                                        class="text-[7px] font-normal ml-0.5">g</span></span>
+                                                                <span class="text-[7px] font-bold text-slate-400 uppercase"><?= number_format($ri['purity'], 2) ?>%</span>
+                                                            </div>
+                                                        <?php endforeach; ?>
+                                                    </div>
+                                                <?php else: ?>
+                                                    <div class="text-[10px] font-bold text-slate-700 leading-none">
+                                                        <?= number_format($t['received_weight'], 3) ?><span
+                                                            class="text-[8px] font-normal ml-0.5">g</span></div>
+                                                    <div class="text-[8px] font-bold text-slate-400 uppercase mt-0.5">
+                                                        <?= number_format($display_purity, 2) ?>%</div>
+                                                <?php endif; ?>
                                             </td>
 
                                             <!-- Fine & Rate -->
                                             <td class="py-1.5 px-2 align-top text-right">
-                                                <div class="text-[10px] font-semibold text-amber-600 leading-none">
-                                                    <?= number_format($t['fine_weight'], 3) ?><span
-                                                        class="text-[8px] font-normal ml-0.5">g</span></div>
-                                                <div class="text-[8px] font-medium text-slate-400 uppercase mt-0.5">@
-                                                    ₹<?= number_format(gold_rate_to_display(floatval($t['rate']), $gold_rate_unit), 0) ?><?= htmlspecialchars($gold_rate_suffix) ?></div>
+                                                <?php if ($is_multi_item_row): ?>
+                                                    <div class="space-y-0.5">
+                                                        <?php foreach ($row_items as $ri): ?>
+                                                            <div class="text-[9px] font-semibold text-amber-600 leading-none whitespace-nowrap">
+                                                                <?= number_format($ri['fine'], 3) ?><span
+                                                                    class="text-[7px] font-normal ml-0.5">g</span></div>
+                                                        <?php endforeach; ?>
+                                                    </div>
+                                                    <div class="text-[8px] font-medium text-slate-400 uppercase mt-0.5">@
+                                                        ₹<?= number_format(gold_rate_to_display(floatval($t['rate']), $gold_rate_unit), 0) ?><?= htmlspecialchars($gold_rate_suffix) ?></div>
+                                                <?php else: ?>
+                                                    <div class="text-[10px] font-semibold text-amber-600 leading-none">
+                                                        <?= number_format($t['fine_weight'], 3) ?><span
+                                                            class="text-[8px] font-normal ml-0.5">g</span></div>
+                                                    <div class="text-[8px] font-medium text-slate-400 uppercase mt-0.5">@
+                                                        ₹<?= number_format(gold_rate_to_display(floatval($t['rate']), $gold_rate_unit), 0) ?><?= htmlspecialchars($gold_rate_suffix) ?></div>
+                                                <?php endif; ?>
                                             </td>
 
                                             <!-- Issue & Diff -->
@@ -2301,7 +2566,7 @@ $total_transactions = count($transactions);
                                     <?php endforeach;
                                 else: ?>
                                     <tr>
-                                        <td colspan="7" class="text-center py-8 text-gray-500">
+                                        <td colspan="8" class="text-center py-8 text-gray-500">
                                             <i class="fas fa-inbox text-2xl mb-2"></i><br>
                                             No transactions found
                                         </td>
@@ -2323,6 +2588,16 @@ $total_transactions = count($transactions);
         const companyName = '<?php echo $_SESSION['company_name'] ?? 'Gold Trading Company'; ?>';
         window.companyId = <?= (int) $company_id ?>;
         window.GOLD_RATE_CONFIG = <?= json_encode(gold_rate_js_config($gold_rate_unit)) ?>;
+        window.EXCHANGE_LIST_CONFIG = <?= json_encode([
+            'startDate' => $start_date,
+            'endDate' => $end_date,
+            'goldRateSuffix' => $gold_rate_suffix,
+            'initialOffset' => count($transactions),
+            'total' => $total_transactions,
+            'hasMore' => $exchange_list_has_more,
+            'pageSize' => $exchange_list_page_size,
+            'search' => $search_raw,
+        ]) ?>;
     </script>
     <script src="js/gold-rate-utils.js"></script>
     <!-- Everything else (party search, receipt search, multi-item rows, save/edit/delete,

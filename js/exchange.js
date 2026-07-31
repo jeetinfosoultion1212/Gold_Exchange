@@ -351,7 +351,7 @@ function addReceivedItem() {
                 <input type="number" step="0.01" class="w-full px-2 py-2 text-xs font-semibold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-yellow-400 focus:border-yellow-400 received-purity" placeholder="0.00" required>
             </td>
             <td class="px-2 py-1.5 border-b">
-                <input type="number" step="0.001" class="w-full px-2 py-2 text-xs font-semibold text-gray-700 bg-white border border-gray-200 rounded received-fine cursor-not-allowed" readonly>
+                <input type="number" step="0.001" class="w-full px-2 py-2 text-xs font-semibold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-emerald-400 focus:border-emerald-400 received-fine" placeholder="0.000">
             </td>
             <td class="px-2 py-1.5 border-b text-center" style="width: 48px;">
                 <button type="button" onclick="removeReceivedItem(this)" class="text-red-600 hover:text-red-800 text-sm">
@@ -446,14 +446,16 @@ function syncIssueMetalFromReceivedRows() {
     }
 }
 
-function calculateTotals() {
+function calculateTotals(recalcFineRows = false) {
     // Received items
     let totalReceivedFine = 0;
     let totalReceivedWeight = 0;
     let weightedPuritySum = 0;
     const receivedRows = document.querySelectorAll('.received-item-row');
     receivedRows.forEach(row => {
-        calculateRowFine(row);
+        if (recalcFineRows) {
+            calculateRowFine(row);
+        }
         const weight = parseFloat(row.querySelector('.received-weight').value) || 0;
         const purity = parseFloat(row.querySelector('.received-purity').value) || 0;
         const fine = parseFloat(row.querySelector('.received-fine').value) || 0;
@@ -505,21 +507,37 @@ function calculateTotals() {
     }
 }
 
+function onReceivedWeightOrPurityInput() {
+    calculateTotals(true);
+}
+
 function attachCalculationListeners() {
     document.querySelectorAll('.received-weight, .received-purity').forEach(input => {
-        input.removeEventListener('input', calculateTotals);
-        input.addEventListener('input', calculateTotals);
+        input.removeEventListener('input', onReceivedWeightOrPurityInput);
+        input.addEventListener('input', onReceivedWeightOrPurityInput);
+    });
+    document.querySelectorAll('.received-fine').forEach(input => {
+        input.removeEventListener('input', onReceivedFineInput);
+        input.addEventListener('input', onReceivedFineInput);
     });
     document.querySelectorAll('.received-material').forEach(sel => {
-        sel.removeEventListener('change', calculateTotals);
-        sel.addEventListener('change', calculateTotals);
+        sel.removeEventListener('change', onReceivedMaterialChange);
+        sel.addEventListener('change', onReceivedMaterialChange);
     });
 
     const issueWeight = document.getElementById('issueWeightInput');
     if (issueWeight) {
-        issueWeight.removeEventListener('input', calculateTotals);
-        issueWeight.addEventListener('input', calculateTotals);
+        issueWeight.removeEventListener('input', onReceivedMaterialChange);
+        issueWeight.addEventListener('input', onReceivedMaterialChange);
     }
+}
+
+function onReceivedFineInput() {
+    calculateTotals(false);
+}
+
+function onReceivedMaterialChange() {
+    calculateTotals(false);
 }
 
 /* ============================================================
@@ -567,7 +585,7 @@ function updatePaymentStatus() {
 }
 
 /* ============================================================
-   4. RECEIPT ID (generate + search/autocomplete)
+   4. RECEIPT ID (generate + sales-style list with infinite scroll)
    ============================================================ */
 function generateReceiptId() {
     $.ajax({
@@ -587,51 +605,332 @@ function generateReceiptId() {
     });
 }
 
-function searchReceiptIds(searchTerm) {
+function escapeExchangeListHtml(value) {
+    if (value == null) return '';
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+function formatExchangeTxnDateParts(dateStr) {
+    if (!dateStr) return { date: '', time: '' };
+    const normalized = String(dateStr).includes('T') ? dateStr : String(dateStr).replace(' ', 'T');
+    const d = new Date(normalized);
+    if (Number.isNaN(d.getTime())) return { date: '', time: '' };
+    const months = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+    const time = d.toLocaleTimeString('en-US', {
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+        timeZone: 'Asia/Kolkata'
+    });
+    return {
+        date: `${String(d.getDate()).padStart(2, '0')} ${months[d.getMonth()]}`,
+        time
+    };
+}
+
+function exchangePaymentBadgeHtml(paymentAmount, amount) {
+    const paid = parseFloat(paymentAmount) || 0;
+    const amt = parseFloat(amount) || 0;
+    if (paid >= amt && amt > 0) {
+        return '<span class="text-[7.5px] px-1 py-0.5 rounded bg-green-100 text-green-700 font-bold uppercase tracking-tighter">Paid</span>';
+    }
+    if (paid > 0) {
+        return '<span class="text-[7.5px] px-1 py-0.5 rounded bg-yellow-100 text-yellow-700 font-bold uppercase tracking-tighter">Part</span>';
+    }
+    return '<span class="text-[7.5px] px-1 py-0.5 rounded bg-rose-100 text-rose-700 font-bold uppercase tracking-tighter">Due</span>';
+}
+
+function buildExchangeTxnWeightPurityCellHtml(item) {
+    const items = Array.isArray(item.items) ? item.items : [];
+    if (items.length > 1) {
+        const rows = items.map(function (ri) {
+            const w = (parseFloat(ri.weight) || 0).toFixed(3);
+            const p = (parseFloat(ri.purity) || 0).toFixed(2);
+            return `<div class="flex items-baseline justify-end gap-1 whitespace-nowrap">
+                <span class="text-[9px] font-bold text-slate-700 leading-none">${w}<span class="text-[7px] font-normal ml-0.5">g</span></span>
+                <span class="text-[7px] font-bold text-slate-400 uppercase">${p}%</span>
+            </div>`;
+        }).join('');
+        return `<div class="space-y-0.5">${rows}</div>`;
+    }
+    const rcvWt = (parseFloat(item.received_weight) || 0).toFixed(3);
+    const purity = (parseFloat(item.display_purity) || 0).toFixed(2);
+    return `
+        <div class="text-[10px] font-bold text-slate-700 leading-none">${rcvWt}<span class="text-[8px] font-normal ml-0.5">g</span></div>
+        <div class="text-[8px] font-bold text-slate-400 uppercase mt-0.5">${purity}%</div>`;
+}
+
+function buildExchangeTxnFineCellHtml(item, rateDisplay, goldSuffix) {
+    const items = Array.isArray(item.items) ? item.items : [];
+    const rateLine = `<div class="text-[8px] font-medium text-slate-400 uppercase mt-0.5">@ &#8377;${rateDisplay}${escapeExchangeListHtml(goldSuffix)}</div>`;
+    if (items.length > 1) {
+        const rows = items.map(function (ri) {
+            const f = (parseFloat(ri.fine) || 0).toFixed(3);
+            return `<div class="text-[9px] font-semibold text-amber-600 leading-none whitespace-nowrap">${f}<span class="text-[7px] font-normal ml-0.5">g</span></div>`;
+        }).join('');
+        return `<div class="space-y-0.5">${rows}</div>${rateLine}`;
+    }
+    const fineWt = (parseFloat(item.fine_weight) || 0).toFixed(3);
+    return `
+        <div class="text-[10px] font-semibold text-amber-600 leading-none">${fineWt}<span class="text-[8px] font-normal ml-0.5">g</span></div>
+        ${rateLine}`;
+}
+
+function buildExchangeTxnRowHtml(item, serial) {
+    const isSilver = String(item.exchange_material || 'Gold').trim().toLowerCase() === 'silver';
+    const coinIcon = isSilver
+        ? '<i class="fas fa-coins text-slate-600 text-[9px] shrink-0" title="Silver (vault issue)" aria-hidden="true"></i>'
+        : '<i class="fas fa-coins text-amber-600 text-[9px] shrink-0" title="Gold (vault issue)" aria-hidden="true"></i>';
+    const dt = formatExchangeTxnDateParts(item.date_of_transaction);
+    const diff = parseFloat(item.difference_weight) || 0;
+    const diffColor = diff > 0 ? 'text-green-600' : (diff < 0 ? 'text-red-600' : 'text-gray-600');
+    const diffPrefix = diff > 0 ? '+' : '';
+    const goldSuffix = (window.EXCHANGE_LIST_CONFIG && window.EXCHANGE_LIST_CONFIG.goldRateSuffix) || '/10g';
+    const issueWt = (parseFloat(item.delivered_weight) || 0).toFixed(3);
+    const rateDisplay = Number(item.rate_display || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+    const amountDisplay = Number(item.amount || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+    const partyName = escapeExchangeListHtml((item.party_name || '').toUpperCase());
+    const receiptId = escapeExchangeListHtml(item.receipt_id);
+
+    return `
+        <tr class="hover:bg-slate-50 transition-colors border-b border-slate-100 last:border-b-0 ge-txn-row">
+            <td class="py-1.5 px-1 align-top text-center ge-serial-col">
+                <span class="text-[9px] font-bold text-slate-400 tabular-nums">${serial}</span>
+            </td>
+            <td class="py-1.5 px-2 align-top group">
+                <div class="text-[10px] font-bold text-blue-600 group-hover:underline truncate flex items-center gap-0.5">
+                    <span class="truncate">#${receiptId}</span>${coinIcon}
+                </div>
+                <div class="text-[8px] font-semibold text-slate-400 leading-tight tabular-nums whitespace-nowrap">${escapeExchangeListHtml(dt.date)} · ${escapeExchangeListHtml(dt.time)}</div>
+            </td>
+            <td class="py-1.5 px-2 align-top ge-party-col">
+                <div class="text-[10px] font-semibold text-slate-800 truncate uppercase" title="${partyName}">${partyName}</div>
+            </td>
+            <td class="py-1.5 px-2 align-top text-right">
+                ${buildExchangeTxnWeightPurityCellHtml(item)}
+            </td>
+            <td class="py-1.5 px-2 align-top text-right">
+                ${buildExchangeTxnFineCellHtml(item, rateDisplay, goldSuffix)}
+            </td>
+            <td class="py-1.5 px-2 align-top text-right">
+                <div class="text-[10px] font-semibold text-slate-600 leading-none">${issueWt}<span class="text-[8px] font-normal ml-0.5">g</span></div>
+                <div class="text-[8px] font-bold ${diffColor} uppercase mt-0.5">${diffPrefix}${diff.toFixed(3)}</div>
+            </td>
+            <td class="py-1.5 px-2 align-top text-right">
+                <div class="text-[10px] font-bold text-slate-800 leading-none">&#8377;${amountDisplay}</div>
+                <div class="mt-1">${exchangePaymentBadgeHtml(item.payment_amount, item.amount)}</div>
+            </td>
+            <td class="py-1.5 px-2 align-top ge-action-col whitespace-nowrap">
+                <div class="flex items-center justify-end gap-0.5">
+                    <button type="button" onclick="event.stopPropagation(); loadTransaction(${parseInt(item.id, 10)});"
+                        class="ge-action-btn text-blue-500 hover:text-blue-700" title="Edit">
+                        <i class="fas fa-edit"></i>
+                    </button>
+                    <button type="button"
+                        onclick="event.stopPropagation(); openExchangeReceiptPrint(${parseInt(item.id, 10)}); return false;"
+                        class="ge-action-btn print-exchange-receipt text-emerald-600 hover:text-emerald-800"
+                        data-id="${parseInt(item.id, 10)}" title="Print Receipt">
+                        <i class="fas fa-print"></i>
+                    </button>
+                </div>
+            </td>
+        </tr>`;
+}
+
+let exchangeTxnListState = { offset: 0, hasMore: false, loading: false };
+let receiptListState = { offset: 0, hasMore: true, loading: false, term: '' };
+
+function initExchangeTxnListState() {
+    const cfg = window.EXCHANGE_LIST_CONFIG || {};
+    exchangeTxnListState = {
+        offset: cfg.initialOffset || 0,
+        hasMore: !!cfg.hasMore,
+        loading: false
+    };
+}
+
+function setTxnListLoader(show) {
+    const $loader = $('#geTxnListLoader');
+    if (show) {
+        if ($loader.length === 0) {
+            $('#recentTransactionList').append(
+                '<tr id="geTxnListLoader"><td colspan="8" class="py-2 text-center text-[10px] text-slate-400"><i class="fas fa-spinner fa-spin mr-1"></i>Loading more...</td></tr>'
+            );
+        }
+    } else {
+        $loader.remove();
+    }
+}
+
+function loadMoreExchangeTransactions() {
+    const cfg = window.EXCHANGE_LIST_CONFIG;
+    if (!cfg || exchangeTxnListState.loading || !exchangeTxnListState.hasMore) return;
+
+    exchangeTxnListState.loading = true;
+    setTxnListLoader(true);
+
     $.ajax({
         url: '',
         method: 'POST',
-        data: {
-            action: 'search_receipt_ids',
-            term: searchTerm
-        },
         dataType: 'json',
-        success: function (receipts) {
-            displayReceiptList(receipts);
+        data: {
+            action: 'get_exchange_list',
+            start_date: cfg.startDate,
+            end_date: cfg.endDate,
+            search: cfg.search || '',
+            offset: exchangeTxnListState.offset,
+            limit: cfg.pageSize || 50
+        },
+        success: function (res) {
+            setTxnListLoader(false);
+            exchangeTxnListState.loading = false;
+            if (!res || res.status !== 'success' || !Array.isArray(res.items)) return;
+
+            const $tbody = $('#recentTransactionList');
+            let serial = $tbody.find('tr.ge-txn-row').length;
+            res.items.forEach(function (item) {
+                serial += 1;
+                $tbody.append(buildExchangeTxnRowHtml(item, serial));
+            });
+            exchangeTxnListState.offset += res.items.length;
+            exchangeTxnListState.hasMore = !!res.has_more;
         },
         error: function () {
-            console.error('Error searching receipt IDs');
+            setTxnListLoader(false);
+            exchangeTxnListState.loading = false;
         }
     });
 }
 
-function displayReceiptList(receipts) {
-    const $receiptList = $('#receiptList');
-    $receiptList.empty();
-    currentReceiptIndex = -1;
+function initExchangeTxnInfiniteScroll() {
+    const scrollEl = document.getElementById('geTxnScroll');
+    if (!scrollEl) return;
+    scrollEl.addEventListener('scroll', function () {
+        if (exchangeTxnListState.loading || !exchangeTxnListState.hasMore) return;
+        if (this.scrollTop + this.clientHeight >= this.scrollHeight - 60) {
+            loadMoreExchangeTransactions();
+        }
+    });
+}
 
-    if (receipts.length === 0) {
-        $receiptList.addClass('hidden');
-        receiptListVisible = false;
-        return;
+function exchangeReceiptMaterialIcon(item) {
+    const isSilver = String(item.exchange_material || 'Gold').trim().toLowerCase() === 'silver';
+    if (isSilver) {
+        return '<span class="inline-flex items-center justify-center w-4 h-4 rounded bg-slate-100 text-slate-700 border border-slate-200 shrink-0" title="Silver"><i class="fas fa-coins text-[7px]"></i></span>';
+    }
+    return '<span class="inline-flex items-center justify-center w-4 h-4 rounded bg-amber-100 text-amber-700 border border-amber-200 shrink-0" title="Gold"><i class="fas fa-coins text-[7px]"></i></span>';
+}
+
+function appendExchangeReceiptListItems(items) {
+    const $receiptList = $('#receiptList');
+    items.forEach(function (item) {
+        const row = document.createElement('div');
+        row.className = 'receipt-list-item px-2 py-1 border-b border-gray-100 hover:bg-blue-50 cursor-pointer text-left receipt-item';
+        row.setAttribute('data-receipt-id', item.receipt_id);
+        const dt = item.date_of_transaction ? String(item.date_of_transaction).split(/[\sT]/)[0] : '';
+        const party = (item.party_name || '').trim() || '—';
+        const wtStr = (parseFloat(item.received_weight) || 0).toFixed(3) + ' g';
+        const amtStr = '₹' + Number(item.amount || 0).toLocaleString('en-IN');
+        const tip = [item.receipt_id, dt, party, wtStr, amtStr].join(' · ');
+        const modeIcon = exchangeReceiptMaterialIcon(item);
+        row.innerHTML = `
+            <div class="flex justify-between items-center gap-1">
+                <span class="flex items-center gap-1 min-w-0">${modeIcon}<span class="font-bold text-blue-600 truncate">${escapeExchangeListHtml(item.receipt_id)}</span></span>
+                <span class="text-gray-400 shrink-0">${escapeExchangeListHtml(dt)}</span>
+            </div>`;
+        const nameEl = document.createElement('div');
+        nameEl.className = 'text-gray-800 truncate mt-px font-medium';
+        nameEl.textContent = party;
+        nameEl.title = tip;
+        row.appendChild(nameEl);
+        const wAmtEl = document.createElement('div');
+        wAmtEl.className = 'text-gray-600 mt-px';
+        wAmtEl.textContent = wtStr + ' · ' + amtStr;
+        wAmtEl.title = tip;
+        row.appendChild(wAmtEl);
+        row.addEventListener('click', function () {
+            selectReceipt(item.receipt_id);
+        });
+        $receiptList[0].appendChild(row);
+    });
+}
+
+function setReceiptListLoader(show) {
+    const $loader = $('#receiptListLoader');
+    if (show) {
+        if ($loader.length === 0) {
+            $('#receiptList').append('<div id="receiptListLoader" class="py-2 px-2 text-center text-gray-400"><i class="fas fa-spinner fa-spin"></i></div>');
+        }
+    } else {
+        $loader.remove();
+    }
+}
+
+function fetchExchangeReceiptList(append) {
+    if (receiptListState.loading) return;
+    if (append && !receiptListState.hasMore) return;
+
+    if (!append) {
+        receiptListState.offset = 0;
+        receiptListState.hasMore = true;
+        $('#receiptList').empty();
     }
 
-    receipts.forEach(function (receipt) {
-        const $item = $('<div>')
-            .addClass('px-3 py-2 hover:bg-yellow-50 cursor-pointer border-b border-gray-100 last:border-b-0 transition-colors receipt-item')
-            .attr('data-receipt-id', receipt.receipt_id)
-            .html(`
-                <div class="font-semibold text-sm text-gray-800">${receipt.receipt_id}</div>
-                <div class="text-xs text-gray-600">${receipt.party_name} • ${receipt.date}</div>
-            `)
-            .click(function () {
-                selectReceipt(receipt.receipt_id);
-            });
-        $receiptList.append($item);
-    });
+    receiptListState.loading = true;
+    setReceiptListLoader(true);
 
-    $receiptList.removeClass('hidden');
-    receiptListVisible = true;
+    $.ajax({
+        url: '',
+        method: 'POST',
+        dataType: 'json',
+        data: {
+            action: 'get_exchange_receipt_list',
+            term: receiptListState.term,
+            offset: receiptListState.offset,
+            limit: append ? 50 : 100
+        },
+        success: function (res) {
+            setReceiptListLoader(false);
+            receiptListState.loading = false;
+            if (!res || res.status !== 'success') {
+                if (!append) {
+                    $('#receiptList').html('<div class="py-2 px-2 text-center text-red-600">Error loading list</div>');
+                }
+                return;
+            }
+            if (!append && (!res.items || res.items.length === 0)) {
+                $('#receiptList').html('<div class="py-2 px-2 text-center text-gray-500">No exchanges found</div>');
+                receiptListVisible = false;
+                receiptListState.hasMore = false;
+                return;
+            }
+            if (res.items && res.items.length > 0) {
+                appendExchangeReceiptListItems(res.items);
+                receiptListState.offset += res.items.length;
+            }
+            receiptListState.hasMore = !!res.has_more;
+            receiptListVisible = true;
+            $('#receiptList').removeClass('hidden');
+            currentReceiptIndex = -1;
+        },
+        error: function () {
+            setReceiptListLoader(false);
+            receiptListState.loading = false;
+            if (!append) {
+                $('#receiptList').html('<div class="py-2 px-2 text-center text-red-600">Error loading list</div>');
+            }
+        }
+    });
+}
+
+function showExchangeReceiptList() {
+    receiptListState.term = '';
+    $('#receiptList').removeClass('hidden');
+    fetchExchangeReceiptList(false);
 }
 
 function selectReceipt(receiptId) {
@@ -645,8 +944,29 @@ function selectReceipt(receiptId) {
 /* ============================================================
    5. PARTY SEARCH / SELECT / DUES / CLEAR
    ============================================================ */
+let partySearchXhr = null;
+let partySearchToken = 0;
+const partySearchCache = new Map();
+
 function searchParties(searchTerm) {
-    $.ajax({
+    const term = searchTerm.trim().toLowerCase();
+
+    // Serve instantly from cache if we've already fetched this exact term
+    // (very common when a user backspaces then retypes the same letters).
+    if (partySearchCache.has(term)) {
+        displayPartyList(partySearchCache.get(term));
+        return;
+    }
+
+    // Abort any still-in-flight request so a slow, older response can't
+    // arrive late and overwrite a newer/faster one (that "flicker" is a big
+    // part of why the list feels late).
+    if (partySearchXhr && partySearchXhr.readyState !== 4) {
+        partySearchXhr.abort();
+    }
+
+    const myToken = ++partySearchToken;
+    partySearchXhr = $.ajax({
         url: '',
         method: 'POST',
         data: {
@@ -655,9 +975,13 @@ function searchParties(searchTerm) {
         },
         dataType: 'json',
         success: function (parties) {
+            if (myToken !== partySearchToken) return; // stale response, ignore
+            if (partySearchCache.size > 50) partySearchCache.clear();
+            partySearchCache.set(term, parties);
             displayPartyList(parties);
         },
-        error: function () {
+        error: function (jqXHR, textStatus) {
+            if (textStatus === 'abort') return;
             console.error('Error searching parties');
         }
     });
@@ -1083,7 +1407,7 @@ function populateFormWithTransaction(transaction) {
                     <input type="number" step="0.01" value="${purity}" class="w-full px-2 py-2 text-xs font-semibold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-yellow-400 focus:border-yellow-400 received-purity" placeholder="0.00" required>
                 </td>
                 <td class="px-2 py-1.5 border-b">
-                    <input type="number" step="0.001" value="${fine}" class="w-full px-2 py-2 text-xs font-semibold text-gray-700 bg-white border border-gray-200 rounded received-fine cursor-not-allowed" readonly>
+                    <input type="number" step="0.001" value="${fine}" class="w-full px-2 py-2 text-xs font-semibold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-emerald-400 focus:border-emerald-400 received-fine" placeholder="0.000">
                 </td>
                 <td class="px-2 py-1.5 border-b text-center" style="width: 48px;">
                     <button type="button" onclick="removeReceivedItem(this)" class="text-red-600 hover:text-red-800 text-sm">
@@ -1126,7 +1450,7 @@ function populateFormWithTransaction(transaction) {
     $('input[name="narration"]').val(transaction.narration || '');
 
     attachCalculationListeners();
-    calculateTotals();
+    calculateTotals(false);
     loadPartyDues(transaction.party_name);
     updatePaymentStatus();
 
@@ -1221,7 +1545,7 @@ function resetForm() {
                 <input type="number" step="0.01" class="w-full px-2 py-1 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-yellow-400 focus:border-yellow-400 received-purity" placeholder="0.00" required>
             </td>
             <td class="px-2 py-1 border-b">
-                <input type="number" step="0.001" class="w-full px-2 py-1 text-xs font-bold text-gray-600 bg-gray-50 border border-gray-200 rounded received-fine cursor-not-allowed" readonly>
+                <input type="number" step="0.001" class="w-full px-2 py-1 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-emerald-400 focus:border-emerald-400 received-fine" placeholder="0.000">
             </td>
             <td class="px-2 py-1 border-b text-center w-10">
                 <button type="button" onclick="removeReceivedItem(this)" class="text-red-400 hover:text-red-600 text-xs transition-colors">
@@ -1257,7 +1581,6 @@ let searchTimeout = null;
 let partyListVisible = false;
 let currentIndex = -1;
 let selectedPartyName = '';
-let receiptSearchTimeout = null;
 let receiptListVisible = false;
 let currentReceiptIndex = -1;
 
@@ -1289,6 +1612,8 @@ $(document).ready(function () {
     updatePaymentStatus();
     attachCalculationListeners();
     calculateTotals();
+    initExchangeTxnListState();
+    initExchangeTxnInfiniteScroll();
 
     // Rate input recalculates amount
     $('#rate').on('input', calculateAmount);
@@ -1317,9 +1642,11 @@ $(document).ready(function () {
         }
 
         clearTimeout(searchTimeout);
+        // Short debounce so the list feels near-instant while typing, but still
+        // avoids firing a request on every single keystroke of a fast typist.
         searchTimeout = setTimeout(function () {
             searchParties(searchTerm);
-        }, 300);
+        }, 120);
     });
 
     $('#partyNameInput').on('keydown', function (e) {
@@ -1370,17 +1697,19 @@ $(document).ready(function () {
         });
     }
 
-    /* ---------- Receipt ID autocomplete ---------- */
-    $('#receiptId').on('click focus', function () {
-        searchReceiptIds('');
+    /* ---------- Receipt ID list (sales-style) ---------- */
+    $('#showReceiptListBtn, #receiptId').on('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        showExchangeReceiptList();
     });
 
-    $('#receiptId').on('input', function () {
-        const searchTerm = $(this).val().trim();
-        clearTimeout(receiptSearchTimeout);
-        receiptSearchTimeout = setTimeout(function () {
-            searchReceiptIds(searchTerm || '');
-        }, 300);
+    $('#receiptList').on('scroll', function () {
+        if (receiptListState.loading || !receiptListState.hasMore) return;
+        const el = this;
+        if (el.scrollTop + el.clientHeight >= el.scrollHeight - 40) {
+            fetchExchangeReceiptList(true);
+        }
     });
 
     $('#receiptId').on('keydown', function (e) {
@@ -1424,7 +1753,7 @@ $(document).ready(function () {
             partyListVisible = false;
             currentIndex = -1;
         }
-        if (!$(e.target).closest('#receiptId, #receiptList').length) {
+        if (!$(e.target).closest('#receiptId, #receiptList, #showReceiptListBtn').length) {
             $('#receiptList').addClass('hidden');
             receiptListVisible = false;
             currentReceiptIndex = -1;

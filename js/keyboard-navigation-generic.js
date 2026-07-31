@@ -526,9 +526,6 @@ const KeyboardNavigationGeneric = (() => {
             errorContainer.textContent = message;
             errorContainer.classList.remove('hidden');
         }
-
-        // Prevent scrolling
-        field.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
 
     /**
@@ -561,8 +558,13 @@ const KeyboardNavigationGeneric = (() => {
         // Check if container already exists
         if (field.parentElement.querySelector('.validation-error')) return;
 
+        const parent = field.parentElement;
+        if (getComputedStyle(parent).position === 'static') {
+            parent.style.position = 'relative';
+        }
+
         const errorDiv = document.createElement('div');
-        errorDiv.className = 'validation-error text-xs text-red-600 mt-1 hidden';
+        errorDiv.className = 'validation-error hidden';
         errorDiv.setAttribute('role', 'alert');
         field.parentElement.appendChild(errorDiv);
     }
@@ -575,6 +577,8 @@ const KeyboardNavigationGeneric = (() => {
             'saleIdInput': 'Sale ID',
             'purchaseIdInput': 'Purchase ID',
             'bookingIdInput': 'Booking ID',
+            'receiptIdInput': 'Receipt ID',
+            'paymentIdInput': 'Payment ID',
             'date_of_transaction': 'Date',
             'partyNameInput': 'Party Name',
             'party_name': 'Party Name',
@@ -587,9 +591,11 @@ const KeyboardNavigationGeneric = (() => {
             'rateInput': 'Rate',
             'total_amount': 'Total',
             'amount': 'Amount',
+            'paymentAmount': 'Amount',
             'totalAmountInput': 'Total Amount',
             'payment_type': 'Payment Type',
             'paymentTypeSelect': 'Payment Type',
+            'payment_method': 'Mode',
             'booking_type': 'Booking Type',
             'bookingTypeSelect': 'Booking Type',
             'narration': 'Narration',
@@ -598,9 +604,16 @@ const KeyboardNavigationGeneric = (() => {
             'additional_cash': 'Cash Received',
             'additional_bank': 'Bank Received',
             'bank_payment_type': 'Bank Payment Type',
-            'purchasePaymentMethodSelect': 'Payment method'
+            'purchasePaymentMethodSelect': 'Payment Method'
         };
-        return labels[fieldName] || fieldName;
+        if (labels[fieldName]) {
+            return labels[fieldName];
+        }
+        let human = String(fieldName).replace(/Input$|Select$/, '').replace(/_/g, ' ').trim();
+        if (!human) {
+            return fieldName;
+        }
+        return human.charAt(0).toUpperCase() + human.slice(1);
     }
 
     /**

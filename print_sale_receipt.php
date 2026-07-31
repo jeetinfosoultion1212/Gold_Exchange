@@ -53,6 +53,100 @@ $created_dt = new DateTime($transaction['date_of_transaction'], new DateTimeZone
 $date = $created_dt->format('d/m/Y');
 $time = $created_dt->format('h:i A');
 
+$paymentTypeLabel = ($transaction['payment_type'] ?? '') === 'Payment_In' ? 'Received' : 'Paid';
+
+$h = static function ($str) {
+    return htmlspecialchars((string) ($str ?? ''), ENT_QUOTES, 'UTF-8');
+};
+
+// HTML print preview (popup + browser print dialog) - same approach as the
+// Exchange receipt, so window.print() actually fires in Chrome's viewer
+// (Chrome ignores PDF-embedded print(true) JS, which is why the old
+// straight-to-PDF flow never showed a print button/dialog automatically).
+if (!isset($_GET['format']) || $_GET['format'] !== 'pdf') {
+    header('Content-Type: text/html; charset=UTF-8');
+    ?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Receipt <?= $h($transaction['receipt_id']) ?></title>
+    <style>
+        @page { size: 80mm auto; margin: 4mm; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Courier New', Courier, monospace;
+            font-weight: bold;
+            background: #525659;
+            min-height: 100vh;
+            display: flex;
+            align-items: flex-start;
+            justify-content: center;
+            padding: 16px;
+        }
+        .receipt {
+            background: #fff;
+            width: 72mm;
+            max-width: 100%;
+            padding: 6mm 4mm;
+            color: #000;
+            font-size: 11px;
+            line-height: 1.35;
+        }
+        .center { text-align: center; }
+        .divider { border-bottom: 1.5px dashed #000; margin: 6px 0; }
+        .row { display: flex; justify-content: space-between; gap: 8px; margin: 3px 0; }
+        .label { flex: 0 0 auto; }
+        .value { text-align: right; flex: 1; }
+        .amount-big { font-size: 13px; }
+        .footer { text-align: center; border-top: 1.5px dashed #000; padding-top: 6px; margin-top: 8px; font-size: 9px; }
+        @media print {
+            body { background: #fff; padding: 0; display: block; }
+            .receipt { width: 72mm; margin: 0 auto; padding: 0; }
+        }
+    </style>
+</head>
+<body>
+    <div class="receipt">
+        <div class="center" style="font-size:15px; margin-bottom:2px;"><?= $h($company_name) ?></div>
+        <div class="center" style="font-size:11px; margin-bottom:4px;">GOLD SALE RECEIPT</div>
+        <div class="divider"></div>
+
+        <div class="row"><span class="label">Receipt:</span><span class="value"><?= $h($transaction['receipt_id']) ?></span></div>
+        <div class="row"><span class="label">Date:</span><span class="value"><?= $h($date . ' ' . $time) ?></span></div>
+        <div class="row"><span class="label">Party:</span><span class="value"><?= $h($transaction['party_name']) ?></span></div>
+        <div class="divider"></div>
+
+        <div class="row"><span class="label">Weight:</span><span class="value"><?= number_format((float) $transaction['gold_weight'], 3) ?> g</span></div>
+        <div class="row"><span class="label">Stock:</span><span class="value"><?= $h($transaction['sale_stock_names']) ?></span></div>
+        <div class="row"><span class="label">Rate:</span><span class="value">Rs.<?= number_format((float) $transaction['rate'], 2) ?>/g</span></div>
+        <div class="divider"></div>
+
+        <div class="row"><span class="label">Total Amount:</span><span class="value amount-big">Rs.<?= number_format((float) $transaction['gold_amount'], 2) ?></span></div>
+        <div class="row"><span class="label"><?= $h($paymentTypeLabel) ?>:</span><span class="value">Rs.<?= number_format((float) $transaction['payment_amount'], 2) ?></span></div>
+        <div class="row"><span class="label">Pay Mode:</span><span class="value"><?= $h($transaction['payment_method']) ?></span></div>
+        <div class="row"><span class="label">Status:</span><span class="value"><?= $h($transaction['payment_status']) ?></span></div>
+
+        <?php if (!empty($transaction['narration'])): ?>
+        <div class="divider"></div>
+        <div style="font-size:10px; margin-bottom:2px;">Note:</div>
+        <div><?= $h($transaction['narration']) ?></div>
+        <?php endif; ?>
+
+        <div class="footer">Thank you for your business!</div>
+    </div>
+    <script>
+        window.addEventListener('load', function () {
+            setTimeout(function () { window.print(); }, 300);
+        });
+    </script>
+</body>
+</html>
+    <?php
+    exit;
+}
+
 // Calculate page height based on content
 $baseHeightMm = 110;
 $remarksExtraMm = !empty($transaction['narration']) ? 10 : 0;

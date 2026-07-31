@@ -1161,11 +1161,21 @@ $total_transactions = $transactions ? $transactions->num_rows : 0;
                 padding: 0.375rem 0.25rem !important;
             }
         }
-    /* Validation error styles */
+    /* Validation error — overlay below field, no layout shift */
     .validation-error {
-        display: block;
-        min-height: 1.25rem;
-        line-height: 1.25rem;
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 100%;
+        z-index: 40;
+        font-size: 9px;
+        line-height: 1.15;
+        color: #dc2626;
+        margin-top: 1px;
+        pointer-events: none;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
 
     .validation-error.hidden {
@@ -1404,7 +1414,7 @@ $total_transactions = $transactions ? $transactions->num_rows : 0;
                                 <i class="fas fa-user text-xs"></i>
                             </span>
                             <input type="hidden" name="party_id" id="partyId">
-                            <input type="text" name="party_name" id="partyNameInput" required autocomplete="off" placeholder="Select Party"
+                            <input type="text" name="party_name" id="partyNameInput" required autocomplete="off" spellcheck="false" placeholder="Select Party"
                                 class="block w-full pl-7 pr-2 py-1.5 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-blue-400 compact-input">
                         </div>
                         <div id="partyList" class="hidden absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-48 overflow-y-auto"></div>
@@ -2404,11 +2414,7 @@ $total_transactions = $transactions ? $transactions->num_rows : 0;
             let selectedPartyName = '';
 
             function updatePartySelectionStatus(isSelected) {
-                if (isSelected) {
-                    $('#partyNameInput').addClass('border-blue-500');
-                } else {
-                    $('#partyNameInput').removeClass('border-blue-500');
-                }
+                /* Visual state handled by validation module; avoid extra border toggles */
             }
 
             function updatePurchasePartySuggestionHighlight(items) {
