@@ -24,7 +24,7 @@
  *   Booking   : +gold_amount
  *   Sale      : -gold_amount + payment_amount
  *   Purchase  : -gold_amount + payment_amount
- *   Exchange  : +due_amount            (fallback: amount - payment_amount)
+ *   Exchange  : ±due_amount (sign follows difference_weight; fallback: amount - payment_amount)
  *   Payment   : Payment_In -> -amount, Payment_Out -> +amount
  *   Received  : -amount
  *
@@ -77,10 +77,14 @@ function party_ledger_transaction_balance_delta(array $trans): float
             return $delta;
 
         case 'EXCHANGE':
-            if (isset($trans['due_amount']) && $trans['due_amount'] !== '' && $trans['due_amount'] !== null) {
-                return floatval($trans['due_amount']);
-            }
-            return floatval($trans['amount'] ?? 0) - floatval($trans['payment_amount'] ?? 0);
+            // due_amount is always stored as a positive "still outstanding" figure; whether it
+            // ADDS to or SUBTRACTS from the party's balance depends on who owes whom, tracked by
+            // difference_weight's sign (mirrors ge_signed_due_delta() in exchange.php).
+            $diffWeight = floatval($trans['difference_weight'] ?? 0);
+            $due = (isset($trans['due_amount']) && $trans['due_amount'] !== '' && $trans['due_amount'] !== null)
+                ? floatval($trans['due_amount'])
+                : (floatval($trans['amount'] ?? 0) - floatval($trans['payment_amount'] ?? 0));
+            return $diffWeight >= 0 ? $due : -$due;
 
         case 'PAYMENT':
             $amt = floatval($trans['payment_amount'] ?? 0);

@@ -29,6 +29,24 @@
  * -----------------------------------------------------------------------
  */
 
+/** Compact SweetAlert2 for simple confirm/alert dialogs (default popup is ~512px wide). */
+function geSwalCompact(options) {
+    const defaults = {
+        width: '320px',
+        padding: '0.85rem 1rem',
+        customClass: {
+            popup: 'ge-swal-sm',
+            confirmButton: 'ge-swal-sm-btn',
+            cancelButton: 'ge-swal-sm-btn'
+        }
+    };
+    const merged = Object.assign({}, defaults, options || {});
+    if (options && options.customClass) {
+        merged.customClass = Object.assign({}, defaults.customClass, options.customClass);
+    }
+    return Swal.fire(merged);
+}
+
 /* ============================================================
    0. PRINT (opens print_exchange_receipt.php in a popup)
    ============================================================ */
@@ -432,13 +450,16 @@ function calculateTotals() {
     // Received items
     let totalReceivedFine = 0;
     let totalReceivedWeight = 0;
+    let weightedPuritySum = 0;
     const receivedRows = document.querySelectorAll('.received-item-row');
     receivedRows.forEach(row => {
         calculateRowFine(row);
         const weight = parseFloat(row.querySelector('.received-weight').value) || 0;
+        const purity = parseFloat(row.querySelector('.received-purity').value) || 0;
         const fine = parseFloat(row.querySelector('.received-fine').value) || 0;
         totalReceivedWeight += weight;
         totalReceivedFine += fine;
+        weightedPuritySum += weight * purity;
     });
 
     document.getElementById('totalReceivedWeight').value = totalReceivedWeight.toFixed(3);
@@ -468,8 +489,9 @@ function calculateTotals() {
     document.getElementById('fineWeight').value = finalFine;
     document.getElementById('issueWeight').value = issueWeight.toFixed(3);
 
+    // Weighted average of entered purities — not back-calculated from rounded fine weight.
     if (totalReceivedWeight > 0) {
-        const avgPurity = (totalReceivedFine / totalReceivedWeight * 100).toFixed(2);
+        const avgPurity = (weightedPuritySum / totalReceivedWeight).toFixed(2);
         document.getElementById('purity').value = avgPurity;
     }
 
@@ -901,6 +923,19 @@ function saveTransaction() {
 
     calculateTotals();
 
+    // Header purity must match entered line purities (server also validates from received_items).
+    let purityWeightSum = 0;
+    let purityWeightedSum = 0;
+    receivedItems.forEach(it => {
+        if (it.weight > 0) {
+            purityWeightSum += it.weight;
+            purityWeightedSum += it.weight * it.purity;
+        }
+    });
+    if (purityWeightSum > 0) {
+        document.getElementById('purity').value = (purityWeightedSum / purityWeightSum).toFixed(2);
+    }
+
     const metalNorm = (m) => (String(m || '').toLowerCase() === 'silver' ? 'Silver' : 'Gold');
     let vaultMetal = 'Gold';
     const wSet = new Set();
@@ -1103,9 +1138,9 @@ function populateFormWithTransaction(transaction) {
 }
 
 function deleteTransaction(id) {
-    Swal.fire({
+    geSwalCompact({
         title: 'Are you sure?',
-        text: "This will delete the transaction and restore the stock!",
+        text: 'This will delete the transaction and restore the stock!',
         icon: 'warning',
         showCancelButton: true,
         confirmButtonColor: '#EF4444',
@@ -1123,7 +1158,7 @@ function deleteTransaction(id) {
                 dataType: 'json',
                 success: function (response) {
                     if (response.status === 'success') {
-                        Swal.fire({
+                        geSwalCompact({
                             icon: 'success',
                             title: 'Deleted!',
                             text: response.message,
@@ -1132,17 +1167,16 @@ function deleteTransaction(id) {
                             location.reload();
                         });
                     } else {
-                        Swal.fire({
+                        geSwalCompact({
                             icon: 'error',
                             title: 'Error!',
                             text: response.message,
-                            width: '320px',
                             confirmButtonColor: '#EAB308'
                         });
                     }
                 },
                 error: function () {
-                    Swal.fire({
+                    geSwalCompact({
                         icon: 'error',
                         title: 'Error!',
                         text: 'Failed to delete transaction',

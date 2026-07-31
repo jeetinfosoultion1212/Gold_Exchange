@@ -2216,6 +2216,10 @@ ob_start();
                 tbody.innerHTML = '';
                 if (s.items && s.items.length > 0) {
                     s.items.forEach((it, idx) => {
+                        const itemWeight = parseFloat(it.gold_weight ?? it.weight ?? 0) || 0;
+                        const itemFine = parseFloat(it.fine_weight ?? it.fine ?? 0) || 0;
+                        const itemRate = parseFloat(it.rate ?? s.rate ?? 0) || 0;
+                        const itemAmount = parseFloat(it.amount ?? 0) || 0;
                         const row = document.createElement('tr');
                         row.className = 'sell-item-row group';
                         row.innerHTML = `
@@ -2224,18 +2228,18 @@ ob_start();
                             <select class="w-full px-2 py-1 text-xs font-bold text-blue-800 bg-white border border-gray-200 rounded sell-item-select">
                                 ${stockOptionsHTML}
                             </select>
-                            <input type="hidden" class="sell-purity" value="${it.purity}">
+                            <input type="hidden" class="sell-purity" value="${it.purity ?? 0}">
                             <input type="hidden" class="sell-stock-id" value="${it.stock_ref_id != null ? it.stock_ref_id : ''}">
                             <input type="hidden" class="sell-stock-name" value="${it.stock_name || ''}">
                         </td>
-                        <td class="px-2 py-1 border-b"><input type="number" step="0.001" class="w-full px-2 py-1 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded sell-weight" value="${it.weight}"></td>
-                        <td class="px-2 py-1 border-b"><input type="number" step="0.01" class="w-full px-2 py-1 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded sell-rate" value="${s.rate || 0}"></td>
-                        <td class="px-2 py-1 border-b"><input type="number" step="0.01" class="w-full px-2 py-1 text-[10px] font-bold text-gray-600 bg-gray-50 border border-gray-200 rounded sell-amount cursor-not-allowed" readonly value="${(parseFloat(it.weight) * parseFloat(s.rate || 0)).toFixed(2)}"></td>
-                        <input type="hidden" class="sell-fine" value="${it.fine}">
+                        <td class="px-2 py-1 border-b"><input type="number" step="0.001" class="w-full px-2 py-1 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded sell-weight" value="${itemWeight}"></td>
+                        <td class="px-2 py-1 border-b"><input type="number" step="0.01" class="w-full px-2 py-1 text-xs font-bold text-gray-900 bg-white border border-gray-200 rounded sell-rate" value="${itemRate}"></td>
+                        <td class="px-2 py-1 border-b"><input type="number" step="0.01" class="w-full px-2 py-1 text-[10px] font-bold text-gray-600 bg-gray-50 border border-gray-200 rounded sell-amount cursor-not-allowed" readonly data-value="${itemAmount}" value="${formatIndian(itemAmount, 0)}"></td>
+                        <input type="hidden" class="sell-fine" value="${itemFine.toFixed(3)}">
                         <td class="px-2 py-1 border-b text-center w-10"><button type="button" onclick="removeSellItem(this)" class="text-red-400 hover:text-red-600 text-xs transition-colors"><i class="fas fa-trash-alt"></i></button></td>
                     `;
                         tbody.appendChild(row);
-                        // Match select to purity and name
+                        // Match select to stock_ref_id first, then stock name + purity
                         const sel = row.querySelector('.sell-item-select');
                         const refId = it.stock_ref_id != null && String(it.stock_ref_id) !== '' ? String(it.stock_ref_id) : '';
                         if (refId && [...sel.options].some(o => o.value === refId)) sel.value = refId;
@@ -2276,6 +2280,13 @@ ob_start();
                 }
                 recalculateSellTotals();
                 document.getElementById('paidAmountInput').value = s.payment_amount || 0;
+                if (typeof setPaymentMode === 'function') {
+                    setPaymentMode(sellListIsBank(s) ? 'Bank' : 'Cash');
+                }
+                const payMethodSelect = document.getElementById('payMethodSelect');
+                if (payMethodSelect && s.payment_method) {
+                    payMethodSelect.value = s.payment_method;
+                }
                 document.querySelector('[name="narration"]').value = s.narration || '';
                 document.getElementById('sellGoldBtn').classList.add('hidden');
                 document.getElementById('updateSaleBtn').classList.remove('hidden');

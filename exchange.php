@@ -62,6 +62,67 @@ function ge_ensure_exchange_schema(mysqli $conn): void
     }
 }
 
+/**
+ * Signed cash/bank ledger delta for an Exchange transaction's due_amount.
+ *
+ * due_amount is always stored as a positive "how much is still outstanding" figure
+ * (used for the Due/Partial/Paid status), but which DIRECTION it moves the party's
+ * balance depends on who owes whom:
+ *   - difference_weight >= 0 (issued more fine metal than received): the CUSTOMER
+ *     owes the shop the difference -> due_amount should INCREASE the party's balance.
+ *   - difference_weight < 0 (received more fine metal than issued): the SHOP owes
+ *     the CUSTOMER the difference -> due_amount should DECREASE the party's balance
+ *     (or push it negative, meaning the shop currently owes the customer money).
+ */
+function ge_signed_due_delta(float $due_amount, float $difference_weight): float
+{
+    return $difference_weight >= 0 ? $due_amount : -$due_amount;
+}
+
+/**
+ * Render a Gold/Silver metal-split stat line, hiding whichever side is zero so an
+ * unused metal (e.g. Silver, if the shop only deals in Gold that day) doesn't clutter
+ * the stats bar. Falls back to a single "0.00 g" segment if both sides are zero.
+ */
+function ge_render_metal_split(float $gold, float $silver, string $goldTitle, string $silverTitle): string
+{
+    $goldHtml = $gold > 0
+        ? '<span class="metal-seg" title="' . htmlspecialchars($goldTitle, ENT_QUOTES) . '"><i class="fas fa-coins metal-icon-gold" aria-hidden="true"></i><span class="metal-num">' . number_format($gold, 2) . '</span><span class="metal-unit">g</span></span>'
+        : '';
+    $silverHtml = $silver > 0
+        ? '<span class="metal-seg" title="' . htmlspecialchars($silverTitle, ENT_QUOTES) . '"><i class="fas fa-coins metal-icon-silver" aria-hidden="true"></i><span class="metal-num">' . number_format($silver, 2) . '</span><span class="metal-unit">g</span></span>'
+        : '';
+
+    if ($goldHtml === '' && $silverHtml === '') {
+        return '<span class="metal-seg"><span class="metal-num">0.00</span><span class="metal-unit">g</span></span>';
+    }
+    if ($goldHtml !== '' && $silverHtml !== '') {
+        return $goldHtml . '<span class="text-slate-300" aria-hidden="true">&middot;</span>' . $silverHtml;
+    }
+    return $goldHtml . $silverHtml;
+}
+
+/** Indian digit grouping (e.g. 1385851 -> "13,85,851") instead of the Western 1,385,851. */
+function ge_format_inr($amount, int $decimals = 0): string
+{
+    $amount = (float) $amount;
+    $negative = $amount < 0;
+    $amount = abs(round($amount, $decimals));
+
+    $parts = explode('.', number_format($amount, $decimals, '.', ''));
+    $integer = $parts[0];
+    $decimalPart = $decimals > 0 ? ('.' . $parts[1]) : '';
+
+    $lastThree = substr($integer, -3);
+    $rest = substr($integer, 0, -3);
+    if ($rest !== '') {
+        $lastThree = ',' . $lastThree;
+        $rest = (string) preg_replace('/\B(?=(\d{2})+(?!\d))/', ',', $rest);
+    }
+
+    return ($negative ? '-' : '') . $rest . $lastThree . $decimalPart;
+}
+
 /** SQL fragment: treat as "fine" bullion row (shops often use 99.90%, not 100%). */
 function ge_sql_fine_purity(): string
 {
@@ -126,6 +187,25 @@ function ge_fetch_fine_stock_for_material(mysqli $conn, int $company_id, string 
         $st->close();
     }
     return null;
+}
+
+/** Weighted average of user-entered purities from received line items (not fine ÷ weight). */
+function ge_weighted_purity_from_received_items(array $items): float
+{
+    $totalWeight = 0.0;
+    $weightedSum = 0.0;
+    foreach ($items as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+        $weight = floatval($item['weight'] ?? 0);
+        if ($weight <= 0) {
+            continue;
+        }
+        $weightedSum += $weight * floatval($item['purity'] ?? 0);
+        $totalWeight += $weight;
+    }
+    return $totalWeight > 0 ? round($weightedSum / $totalWeight, 2) : 0.0;
 }
 
 // Get company_id from session
@@ -345,6 +425,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             } elseif (count($decoded_rx) > 0) {
                                 // No line with weight yet / parsing edge: use first row's Metal (matches UI)
                                 $exchange_material = ge_normalize_exchange_material($decoded_rx[0]['material'] ?? 'Gold');
+                            }
+                            // Store entered purities — never back-calculate from rounded fine weight.
+                            $item_purity = ge_weighted_purity_from_received_items($decoded_rx);
+                            if ($item_purity > 0) {
+                                $purity = $item_purity;
                             }
                         }
                     }
@@ -725,7 +810,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $old_is_cash = !in_array($old_method, ['Bank', 'UPI', 'Cheque', 'NEFT', 'RTGS']);
                         $orig_metal_silver = strcasecmp($original_exchange_material, 'Silver') === 0;
 
-                        $revert_amt = -$original_due_amount;
+                        $revert_amt = -ge_signed_due_delta($original_due_amount, $original_difference_weight);
                         $revert_metal = -$original_difference_weight;
 
                         if ($old_is_cash) {
@@ -755,26 +840,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     $is_current_cash = !in_array($payment_method, ['Bank', 'UPI', 'Cheque', 'NEFT', 'RTGS']);
                     $metal_silver = strcasecmp($exchange_material, 'Silver') === 0;
+                    // Signed so a negative difference (shop owes customer) reduces the party's
+                    // balance instead of always adding to it — see ge_signed_due_delta() above.
+                    $signed_due_amount = ge_signed_due_delta($due_amount, $difference_weight);
 
                     if ($is_current_cash) {
                         if ($metal_silver) {
                             $update_party_sql = "UPDATE parties SET cash_balance = cash_balance + ?, silver_balance = silver_balance + ? WHERE id = ?";
                             $update_party_stmt = $conn->prepare($update_party_sql);
-                            $update_party_stmt->bind_param("ddi", $due_amount, $difference_weight, $party_id);
+                            $update_party_stmt->bind_param("ddi", $signed_due_amount, $difference_weight, $party_id);
                         } else {
                             $update_party_sql = "UPDATE parties SET cash_balance = cash_balance + ? WHERE id = ?";
                             $update_party_stmt = $conn->prepare($update_party_sql);
-                            $update_party_stmt->bind_param("di", $due_amount, $party_id);
+                            $update_party_stmt->bind_param("di", $signed_due_amount, $party_id);
                         }
                     } else {
                         if ($metal_silver) {
                             $update_party_sql = "UPDATE parties SET bank_balance = bank_balance + ?, silver_balance = silver_balance + ? WHERE id = ?";
                             $update_party_stmt = $conn->prepare($update_party_sql);
-                            $update_party_stmt->bind_param("ddi", $due_amount, $difference_weight, $party_id);
+                            $update_party_stmt->bind_param("ddi", $signed_due_amount, $difference_weight, $party_id);
                         } else {
                             $update_party_sql = "UPDATE parties SET bank_balance = bank_balance + ? WHERE id = ?";
                             $update_party_stmt = $conn->prepare($update_party_sql);
-                            $update_party_stmt->bind_param("di", $due_amount, $party_id);
+                            $update_party_stmt->bind_param("di", $signed_due_amount, $party_id);
                         }
                     }
 
@@ -985,7 +1073,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $del_pm = $transaction['payment_method'] ?? 'Cash';
                         $del_cash = !in_array($del_pm, ['Bank', 'UPI', 'Cheque', 'NEFT', 'RTGS'], true);
                         $del_silver = strcasecmp($del_ex_mat, 'Silver') === 0;
-                        $rv_amt = -$del_due;
+                        $rv_amt = -ge_signed_due_delta($del_due, $del_diff);
                         $rv_met = -$del_diff;
                         if ($del_cash) {
                             if ($del_silver) {
@@ -1269,7 +1357,13 @@ if ($cash_stmt) {
 $search = isset($_GET['search']) ? "%" . $conn->real_escape_string($_GET['search']) . "%" : null;
 
 // Transactions query with search and date filter (shows ALL matching transactions for the selected range - no pagination cap)
-$transactions_sql = "SELECT t.*, p.party_name 
+$transactions_sql = "SELECT t.*, p.party_name,
+    (SELECT CASE WHEN SUM(ei.weight) > 0
+         THEN ROUND(SUM(ei.weight * ei.purity) / SUM(ei.weight), 2)
+         ELSE NULL END
+     FROM exchange_items ei
+     WHERE ei.transaction_id = t.id AND ei.company_id = t.company_id AND ei.item_type = 'received'
+    ) AS item_purity
     FROM transactions t 
     LEFT JOIN parties p ON t.party_id = p.id 
     WHERE t.company_id = ? AND DATE(t.date_of_transaction) BETWEEN ? AND ? AND t.transaction_type = 'Exchange'";
@@ -1552,6 +1646,37 @@ $total_transactions = count($transactions);
         .ge-txn-scroll::-webkit-scrollbar-track {
             background: transparent;
         }
+
+        /* Compact SweetAlert2 for simple confirm / alert dialogs */
+        .ge-swal-sm.swal2-popup {
+            border-radius: 0.5rem;
+        }
+
+        .ge-swal-sm .swal2-title {
+            font-size: 1rem !important;
+            padding: 0.15rem 0 0 !important;
+        }
+
+        .ge-swal-sm .swal2-html-container {
+            font-size: 0.8125rem !important;
+            margin: 0.2rem 0 0 !important;
+        }
+
+        .ge-swal-sm .swal2-icon {
+            margin: 0.35rem auto 0.1rem !important;
+            transform: scale(0.78);
+        }
+
+        .ge-swal-sm .swal2-actions {
+            margin-top: 0.65rem !important;
+            gap: 0.45rem;
+        }
+
+        .ge-swal-sm .swal2-styled {
+            font-size: 0.75rem !important;
+            padding: 0.35rem 0.9rem !important;
+            margin: 0 !important;
+        }
     </style>
 </head>
 
@@ -1568,15 +1693,7 @@ $total_transactions = count($transactions);
                     <div class="min-w-0 flex-1">
                         <p class="stats-card-label uppercase">Rcv. weight</p>
                         <p class="stats-metal-split stats-metal-split--hero">
-                            <span class="metal-seg" title="Gold received weight">
-                                <i class="fas fa-coins metal-icon-gold" aria-hidden="true"></i>
-                                <span class="metal-num"><?= number_format($stats['rcv_gold'] ?? 0, 2) ?></span><span class="metal-unit">g</span>
-                            </span>
-                            <span class="text-slate-300" aria-hidden="true">·</span>
-                            <span class="metal-seg" title="Silver received weight">
-                                <i class="fas fa-coins metal-icon-silver" aria-hidden="true"></i>
-                                <span class="metal-num"><?= number_format($stats['rcv_silver'] ?? 0, 2) ?></span><span class="metal-unit">g</span>
-                            </span>
+                            <?= ge_render_metal_split($stats['rcv_gold'] ?? 0, $stats['rcv_silver'] ?? 0, 'Gold received weight', 'Silver received weight') ?>
                         </p>
                     </div>
                     <div class="stats-icon-wrap bg-sky-100 stats-icon shrink-0">
@@ -1590,15 +1707,7 @@ $total_transactions = count($transactions);
                     <div class="min-w-0 flex-1">
                         <p class="stats-card-label uppercase">Fine (received)</p>
                         <p class="stats-metal-split stats-metal-split--hero">
-                            <span class="metal-seg" title="Fine gold received">
-                                <i class="fas fa-coins metal-icon-gold" aria-hidden="true"></i>
-                                <span class="metal-num"><?= number_format($stats['fine_gold_scrap'] ?? 0, 2) ?></span><span class="metal-unit">g</span>
-                            </span>
-                            <span class="text-slate-300" aria-hidden="true">·</span>
-                            <span class="metal-seg" title="Fine silver received">
-                                <i class="fas fa-coins metal-icon-silver" aria-hidden="true"></i>
-                                <span class="metal-num"><?= number_format($stats['fine_silver_scrap'] ?? 0, 2) ?></span><span class="metal-unit">g</span>
-                            </span>
+                            <?= ge_render_metal_split($stats['fine_gold_scrap'] ?? 0, $stats['fine_silver_scrap'] ?? 0, 'Fine gold received', 'Fine silver received') ?>
                         </p>
                     </div>
                     <div class="stats-icon-wrap bg-emerald-100 stats-icon shrink-0">
@@ -1612,15 +1721,7 @@ $total_transactions = count($transactions);
                     <div class="min-w-0 flex-1">
                         <p class="stats-card-label uppercase">Issue weight</p>
                         <p class="stats-metal-split stats-metal-split--hero">
-                            <span class="metal-seg" title="Gold issued from vault">
-                                <i class="fas fa-coins metal-icon-gold" aria-hidden="true"></i>
-                                <span class="metal-num"><?= number_format($stats['issue_gold'] ?? 0, 2) ?></span><span class="metal-unit">g</span>
-                            </span>
-                            <span class="text-slate-300" aria-hidden="true">·</span>
-                            <span class="metal-seg" title="Silver issued from vault">
-                                <i class="fas fa-coins metal-icon-silver" aria-hidden="true"></i>
-                                <span class="metal-num"><?= number_format($stats['issue_silver'] ?? 0, 2) ?></span><span class="metal-unit">g</span>
-                            </span>
+                            <?= ge_render_metal_split($stats['issue_gold'] ?? 0, $stats['issue_silver'] ?? 0, 'Gold issued from vault', 'Silver issued from vault') ?>
                         </p>
                     </div>
                     <div class="stats-icon-wrap bg-amber-100 stats-icon shrink-0">
@@ -1629,6 +1730,7 @@ $total_transactions = count($transactions);
                 </div>
             </div>
 
+            <?php if (($stats['current_stock'] ?? 0) > 0): ?>
             <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
                 <div class="flex items-center justify-between">
                     <div>
@@ -1642,7 +1744,9 @@ $total_transactions = count($transactions);
                     </div>
                 </div>
             </div>
+            <?php endif; ?>
 
+            <?php if (($stats['fine_silver_stock'] ?? 0) > 0): ?>
             <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
                 <div class="flex items-center justify-between">
                     <div>
@@ -1656,13 +1760,14 @@ $total_transactions = count($transactions);
                     </div>
                 </div>
             </div>
+            <?php endif; ?>
 
             <div class="bg-white rounded-xl p-3 shadow-sm border border-slate-200/50 stats-card">
                 <div class="flex items-center justify-between">
                     <div>
                         <p class="stats-card-label uppercase">Cash</p>
                         <p class="stats-card-value leading-tight">
-                            ₹<?= number_format($stats['cash_balance'] ?? 0, 0) ?></p>
+                            ₹<?= ge_format_inr($stats['cash_balance'] ?? 0) ?></p>
                     </div>
                     <div class="stats-icon-wrap bg-slate-200/80 stats-icon">
                         <i class="fas fa-wallet text-slate-600 text-xs"></i>
@@ -1675,7 +1780,7 @@ $total_transactions = count($transactions);
                     <div>
                         <p class="stats-card-label uppercase">Received</p>
                         <p class="stats-card-value leading-tight">
-                            ₹<?= number_format($stats['total_paid_amount'] ?? 0, 0) ?></p>
+                            ₹<?= ge_format_inr($stats['total_paid_amount'] ?? 0) ?></p>
                     </div>
                     <div class="stats-icon-wrap bg-teal-100 stats-icon">
                         <i class="fas fa-arrow-up text-teal-600 text-xs"></i>
@@ -1688,7 +1793,7 @@ $total_transactions = count($transactions);
                     <div>
                         <p class="stats-card-label uppercase">Paid</p>
                         <p class="stats-card-value leading-tight">
-                            ₹<?= number_format($stats['total_payment_amount'] ?? 0, 0) ?></p>
+                            ₹<?= ge_format_inr($stats['total_payment_amount'] ?? 0) ?></p>
                     </div>
                     <div class="stats-icon-wrap bg-rose-100 stats-icon">
                         <i class="fas fa-arrow-down text-rose-500 text-xs"></i>
@@ -2089,6 +2194,9 @@ $total_transactions = count($transactions);
                                         $isPaymentIn = $t['payment_type'] === 'Payment_In';
                                         $ex_mat_list = strtolower(trim($t['exchange_material'] ?? 'Gold'));
                                         $is_silver_row = ($ex_mat_list === 'silver');
+                                        $display_purity = ($t['item_purity'] !== null && $t['item_purity'] !== '')
+                                            ? floatval($t['item_purity'])
+                                            : floatval($t['purity']);
 
                                         // Payment Column Logic (Shows ACTUAL Paid Amount)
                                         $paidAmount = $t['payment_amount'];
@@ -2137,7 +2245,7 @@ $total_transactions = count($transactions);
                                                     <?= number_format($t['received_weight'], 3) ?><span
                                                         class="text-[8px] font-normal ml-0.5">g</span></div>
                                                 <div class="text-[8px] font-bold text-slate-400 uppercase mt-0.5">
-                                                    <?= number_format($t['purity'], 2) ?>%</div>
+                                                    <?= number_format($display_purity, 2) ?>%</div>
                                             </td>
 
                                             <!-- Fine & Rate -->
@@ -2219,7 +2327,7 @@ $total_transactions = count($transactions);
     <script src="js/gold-rate-utils.js"></script>
     <!-- Everything else (party search, receipt search, multi-item rows, save/edit/delete,
          add-party modal, clear-party button) now lives in this ONE file. -->
-    <script src="js/exchange.js"></script>
+    <script src="js/exchange.js?v=<?= filemtime(__DIR__ . '/js/exchange.js') ?>"></script>
 </body>
 
 </html>
