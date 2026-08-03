@@ -368,7 +368,11 @@ $(document).ready(function () {
         e.preventDefault();
         const id = $(this).data('id');
         if (id) {
-            window.open('print_sale_receipt.php?id=' + id, '_blank');
+            if (window.GePrint && typeof window.GePrint.printReceipt === 'function') {
+                window.GePrint.printReceipt('print_sale_receipt.php?id=' + encodeURIComponent(id));
+            } else {
+                window.open('print_sale_receipt.php?id=' + id, '_blank');
+            }
         }
     });
 
@@ -877,7 +881,11 @@ window.saveTransaction = function () {
                     cancelButtonColor: '#6B7280'
                 }).then((result) => {
                     if (result.isConfirmed && response.transaction_id) {
-                        window.open('print_sale_receipt.php?id=' + response.transaction_id, '_blank');
+                        if (window.GePrint && typeof window.GePrint.printReceipt === 'function') {
+                            window.GePrint.printReceipt('print_sale_receipt.php?id=' + encodeURIComponent(response.transaction_id));
+                        } else {
+                            window.open('print_sale_receipt.php?id=' + response.transaction_id, '_blank');
+                        }
                     }
                     // Refresh party balance display before reload
                     const partyName = $('#partyNameInput').val().trim();

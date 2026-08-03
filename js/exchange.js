@@ -53,6 +53,9 @@ function geSwalCompact(options) {
    function openExchangeReceiptPrint(transactionId) {
     if (!transactionId) return null;
     const url = 'print_exchange_receipt.php?id=' + encodeURIComponent(transactionId);
+    if (window.GePrint && typeof window.GePrint.printReceipt === 'function') {
+        return window.GePrint.printReceipt(url);
+    }
     const width = Math.min(1100, window.screen.availWidth - 20);
     const height = Math.min(820, window.screen.availHeight - 40);
     const left = window.screenX + Math.max(0, (window.outerWidth - width) / 2);
@@ -636,32 +639,38 @@ function exchangePaymentBadgeHtml(paymentAmount, amount) {
     const paid = parseFloat(paymentAmount) || 0;
     const amt = parseFloat(amount) || 0;
     if (paid >= amt && amt > 0) {
-        return '<span class="text-[7.5px] px-1 py-0.5 rounded bg-green-100 text-green-700 font-bold uppercase tracking-tighter">Paid</span>';
+        return '<span class="ge-pay-badge bg-green-100 text-green-700">Paid</span>';
     }
     if (paid > 0) {
-        return '<span class="text-[7.5px] px-1 py-0.5 rounded bg-yellow-100 text-yellow-700 font-bold uppercase tracking-tighter">Part</span>';
+        return '<span class="ge-pay-badge bg-yellow-100 text-yellow-700">Part</span>';
     }
-    return '<span class="text-[7.5px] px-1 py-0.5 rounded bg-rose-100 text-rose-700 font-bold uppercase tracking-tighter">Due</span>';
+    return '<span class="ge-pay-badge bg-rose-100 text-rose-700">Due</span>';
 }
 
-function buildExchangeTxnWeightPurityCellHtml(item) {
+function buildExchangeTxnWeightCellHtml(item) {
     const items = Array.isArray(item.items) ? item.items : [];
     if (items.length > 1) {
         const rows = items.map(function (ri) {
             const w = (parseFloat(ri.weight) || 0).toFixed(3);
-            const p = (parseFloat(ri.purity) || 0).toFixed(2);
-            return `<div class="flex items-baseline justify-end gap-1 whitespace-nowrap">
-                <span class="text-[9px] font-bold text-slate-700 leading-none">${w}<span class="text-[7px] font-normal ml-0.5">g</span></span>
-                <span class="text-[7px] font-bold text-slate-400 uppercase">${p}%</span>
-            </div>`;
+            return `<div class="text-[9px] font-bold text-slate-700 leading-none whitespace-nowrap">${w}<span class="text-[7px] font-normal ml-0.5">g</span></div>`;
         }).join('');
         return `<div class="space-y-0.5">${rows}</div>`;
     }
     const rcvWt = (parseFloat(item.received_weight) || 0).toFixed(3);
+    return `<div class="text-[10px] font-bold text-slate-700 leading-none">${rcvWt}<span class="text-[8px] font-normal ml-0.5">g</span></div>`;
+}
+
+function buildExchangeTxnPurityCellHtml(item) {
+    const items = Array.isArray(item.items) ? item.items : [];
+    if (items.length > 1) {
+        const rows = items.map(function (ri) {
+            const p = (parseFloat(ri.purity) || 0).toFixed(2);
+            return `<div class="text-[9px] font-semibold text-slate-500 leading-none whitespace-nowrap">${p}%</div>`;
+        }).join('');
+        return `<div class="space-y-0.5">${rows}</div>`;
+    }
     const purity = (parseFloat(item.display_purity) || 0).toFixed(2);
-    return `
-        <div class="text-[10px] font-bold text-slate-700 leading-none">${rcvWt}<span class="text-[8px] font-normal ml-0.5">g</span></div>
-        <div class="text-[8px] font-bold text-slate-400 uppercase mt-0.5">${purity}%</div>`;
+    return `<div class="text-[10px] font-semibold text-slate-500 leading-none whitespace-nowrap">${purity}%</div>`;
 }
 
 function buildExchangeTxnFineCellHtml(item, rateDisplay, goldSuffix) {
@@ -701,7 +710,7 @@ function buildExchangeTxnRowHtml(item, serial) {
             <td class="py-1.5 px-1 align-top text-center ge-serial-col">
                 <span class="text-[9px] font-bold text-slate-400 tabular-nums">${serial}</span>
             </td>
-            <td class="py-1.5 px-2 align-top group">
+            <td class="py-1.5 px-2 align-top group ge-id-col">
                 <div class="text-[10px] font-bold text-blue-600 group-hover:underline truncate flex items-center gap-0.5">
                     <span class="truncate">#${receiptId}</span>${coinIcon}
                 </div>
@@ -710,19 +719,22 @@ function buildExchangeTxnRowHtml(item, serial) {
             <td class="py-1.5 px-2 align-top ge-party-col">
                 <div class="text-[10px] font-semibold text-slate-800 truncate uppercase" title="${partyName}">${partyName}</div>
             </td>
-            <td class="py-1.5 px-2 align-top text-right">
-                ${buildExchangeTxnWeightPurityCellHtml(item)}
+            <td class="py-1.5 px-2 align-top text-right ge-rcv-col">
+                ${buildExchangeTxnWeightCellHtml(item)}
             </td>
-            <td class="py-1.5 px-2 align-top text-right">
+            <td class="py-1.5 px-2 align-top text-right ge-purity-col">
+                ${buildExchangeTxnPurityCellHtml(item)}
+            </td>
+            <td class="py-1.5 px-2 align-top text-right ge-fine-col">
                 ${buildExchangeTxnFineCellHtml(item, rateDisplay, goldSuffix)}
             </td>
-            <td class="py-1.5 px-2 align-top text-right">
+            <td class="py-1.5 px-2 align-top text-right ge-issue-col">
                 <div class="text-[10px] font-semibold text-slate-600 leading-none">${issueWt}<span class="text-[8px] font-normal ml-0.5">g</span></div>
                 <div class="text-[8px] font-bold ${diffColor} uppercase mt-0.5">${diffPrefix}${diff.toFixed(3)}</div>
             </td>
-            <td class="py-1.5 px-2 align-top text-right">
+            <td class="py-1.5 px-2 align-top text-right ge-amount-col">
                 <div class="text-[10px] font-bold text-slate-800 leading-none">&#8377;${amountDisplay}</div>
-                <div class="mt-1">${exchangePaymentBadgeHtml(item.payment_amount, item.amount)}</div>
+                <div class="mt-1 flex justify-end">${exchangePaymentBadgeHtml(item.payment_amount, item.amount)}</div>
             </td>
             <td class="py-1.5 px-2 align-top ge-action-col whitespace-nowrap">
                 <div class="flex items-center justify-end gap-0.5">
@@ -758,7 +770,7 @@ function setTxnListLoader(show) {
     if (show) {
         if ($loader.length === 0) {
             $('#recentTransactionList').append(
-                '<tr id="geTxnListLoader"><td colspan="8" class="py-2 text-center text-[10px] text-slate-400"><i class="fas fa-spinner fa-spin mr-1"></i>Loading more...</td></tr>'
+                '<tr id="geTxnListLoader"><td colspan="9" class="py-2 text-center text-[10px] text-slate-400"><i class="fas fa-spinner fa-spin mr-1"></i>Loading more...</td></tr>'
             );
         }
     } else {
@@ -1215,7 +1227,35 @@ function clearPartySelection() {
 /* ============================================================
    6. SAVE / LOAD / DELETE TRANSACTION (multi-item — the only path)
    ============================================================ */
+let exchangeSaveInProgress = false;
+
+function setExchangeSaveLoading(loading) {
+    const $btn = $('#submitBtn');
+    const $icon = $('#submitIcon');
+    const $text = $('#submitText');
+    const isUpdate = !!$('input[name="transaction_id"]').val();
+    const defaultLabel = isUpdate ? 'Update' : 'Save';
+    const defaultIcon = isUpdate ? 'fa-save' : 'fa-exchange-alt';
+
+    exchangeSaveInProgress = loading;
+    $btn.prop('disabled', loading);
+    $('#deleteBtn, #resetFormBtn').prop('disabled', loading);
+
+    if (loading) {
+        $icon.removeClass('fa-save fa-exchange-alt').addClass('fa-spinner fa-spin');
+        $text.text(isUpdate ? 'Updating...' : 'Saving...');
+        $btn.addClass('opacity-75 cursor-not-allowed');
+    } else {
+        $icon.removeClass('fa-spinner fa-spin').addClass(defaultIcon);
+        $text.text(defaultLabel);
+        $btn.removeClass('opacity-75 cursor-not-allowed');
+    }
+}
+
 function saveTransaction() {
+    if (exchangeSaveInProgress) return;
+    setExchangeSaveLoading(true);
+
     updatePaymentStatus();
 
     const receivedItems = [];
@@ -1236,6 +1276,7 @@ function saveTransaction() {
         if (it.weight > 0) metalsWithWeight.add(it.material || 'Gold');
     });
     if (metalsWithWeight.size > 1) {
+        setExchangeSaveLoading(false);
         Swal.fire({
             icon: 'error',
             title: 'Mixed metals',
@@ -1246,6 +1287,7 @@ function saveTransaction() {
     }
 
     calculateTotals();
+    updatePaymentStatus();
 
     // Header purity must match entered line purities (server also validates from received_items).
     let purityWeightSum = 0;
@@ -1305,6 +1347,7 @@ function saveTransaction() {
                     window.location.href = window.location.pathname + '?focus=party';
                 });
             } else {
+                setExchangeSaveLoading(false);
                 Swal.fire({
                     icon: 'error',
                     title: 'Error!',
@@ -1315,6 +1358,7 @@ function saveTransaction() {
             }
         },
         error: function () {
+            setExchangeSaveLoading(false);
             Swal.fire({
                 icon: 'error',
                 title: 'Error!',
@@ -1445,7 +1489,15 @@ function populateFormWithTransaction(transaction) {
     $('#rate').val(transaction.rate || 0);
     $('#amount').val(transaction.amount || 0);
     $('#paymentAmount').val(transaction.payment_amount || 0);
-    $('select[name="payment_method"]').val(transaction.payment_method || 'Cash');
+    const pm = transaction.payment_method || 'Cash';
+    const pmSelect = $('select[name="payment_method"]');
+    if (pmSelect.find(`option[value="${pm}"]`).length) {
+        pmSelect.val(pm);
+    } else if (pm === 'Bank' || pm === 'Bank Transfer' || pm === 'NEFT' || pm === 'RTGS') {
+        pmSelect.val('Bank');
+    } else {
+        pmSelect.val('Cash');
+    }
     $('input[name="payment_status"]').val(transaction.payment_status || 'Due');
     $('input[name="narration"]').val(transaction.narration || '');
 
@@ -1565,8 +1617,9 @@ function resetForm() {
     selectedPartyName = '';
 
     $('#deleteBtn').addClass('hidden');
+    setExchangeSaveLoading(false);
     $('#submitText').text('Save');
-    $('#submitIcon').removeClass('fa-save').addClass('fa-exchange-alt');
+    $('#submitIcon').removeClass('fa-save fa-spinner fa-spin').addClass('fa-exchange-alt');
 
     $('#differenceWeight').removeClass('text-red-600 text-green-600 font-bold');
 

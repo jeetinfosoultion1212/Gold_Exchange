@@ -694,6 +694,11 @@ function printBookingReceipt(bookingData, companyName) {
         </html>
     `;
     
+    if (window.GePrint && typeof window.GePrint.printHtml === 'function') {
+        window.GePrint.printHtml(printContent);
+        return;
+    }
+
     const printWindow = window.open('', '_blank', 'width=300,height=600');
     printWindow.document.write(printContent);
     printWindow.document.close();

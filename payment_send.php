@@ -1565,7 +1565,12 @@ $payment_list_has_more = $total_transactions > count($transactions_list);
         });
 
         $(document).on('click', '.print-send-btn', function () {
-            window.open('print_payment_receipt.php?id=' + $(this).data('id'), '_blank');
+            const url = 'print_payment_receipt.php?id=' + encodeURIComponent($(this).data('id'));
+            if (window.GePrint && typeof window.GePrint.printReceipt === 'function') {
+                window.GePrint.printReceipt(url);
+            } else {
+                window.open(url, '_blank');
+            }
         });
 
         $('#paymentOutForm').on('submit', function (e) {

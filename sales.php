@@ -1471,6 +1471,9 @@ ob_start();
     function openSaleReceiptPrint(transactionId) {
         if (!transactionId) return null;
         const url = 'print_sale_receipt.php?id=' + encodeURIComponent(transactionId);
+        if (window.GePrint && typeof window.GePrint.printReceipt === 'function') {
+            return window.GePrint.printReceipt(url);
+        }
         const width = Math.min(1100, window.screen.availWidth - 20);
         const height = Math.min(820, window.screen.availHeight - 40);
         const left = window.screenX + Math.max(0, (window.outerWidth - width) / 2);

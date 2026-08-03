@@ -241,6 +241,11 @@ $current_page = basename($_SERVER['PHP_SELF']);
             </div>
 
     <!-- Scripts -->
+    <?php
+    $ge_desktop_app = (getenv('PHPDESKTOP_VERSION') !== false || getenv('GOLD_EXCHANGE_DESKTOP') !== false);
+    ?>
+    <script>window.GE_DESKTOP_APP = <?= $ge_desktop_app ? 'true' : 'false' ?>;</script>
+    <script src="js/desktop_print.js"></script>
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
     

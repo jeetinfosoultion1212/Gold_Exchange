@@ -5,6 +5,8 @@ dist-*/
 win-unpacked/
 electron-desktop/dist/
 electron-desktop/win-unpacked/
+electron-desktop/data/
+electron-desktop/server/
 
 # Node Modules
 node_modules/
@@ -29,3 +31,8 @@ Desktop.ini
 
 # Desktop Binaries (Too large for Git)
 desktop_package/
+deployment_package.zip
+
+# Local DB backups and scratch files
+backups/
+_test_repro.html

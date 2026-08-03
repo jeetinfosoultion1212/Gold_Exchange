@@ -20,6 +20,7 @@ require_once __DIR__ . '/config/database.php';
 require_once __DIR__ . '/handlers/account_balance_helper.php';
 require_once __DIR__ . '/helpers/gold_rate_helper.php';
 require_once __DIR__ . '/helpers/receipt_id_helper.php';
+require_once __DIR__ . '/helpers/transaction_helper.php';
 
 if ($conn->connect_error) {
     die(json_encode(['status' => 'error', 'message' => 'Connection failed: ' . $conn->connect_error]));
@@ -612,26 +613,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                     $rate = gold_rate_from_display(floatval($data['rate']), $gold_rate_unit);
                     $amount = floatval($data['amount']);
-                    $payment_method = $conn->real_escape_string($data['payment_method'] ?? 'Cash');
+                    $payment_method = ge_normalize_payment_method($data['payment_method'] ?? 'Cash');
                     $payment_amount = floatval($data['payment_amount'] ?? 0);
                     $due_amount = $amount - $payment_amount;
-
-                    // Calculate payment status based on payment amount and total amount
-                    // If payment_amount >= amount: Paid
-                    // If payment_amount > 0 but < amount: Partial
-                    // If payment_amount = 0: Due
-                    if ($amount > 0 && $payment_amount >= $amount) {
-                        $payment_status = 'Paid';
-                    } else if ($payment_amount > 0) {
-                        $payment_status = 'Partial';
-                    } else {
-                        $payment_status = 'Due';
-                    }
-
-                    // Override with user-provided status if explicitly set (for edits)
-                    if (isset($data['payment_status']) && !empty($data['payment_status'])) {
-                        $payment_status = $conn->real_escape_string($data['payment_status']);
-                    }
+                    $payment_status = ge_normalize_payment_status($data['payment_status'] ?? '', $amount, $payment_amount);
 
                     $narration = $conn->real_escape_string($data['narration'] ?? '');
 
@@ -855,15 +840,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             company_id, user_id, receipt_id, party_id, date_of_transaction, received_weight,
                             purity, fine_weight, delivered_weight, difference_weight,
                             rate, amount, payment_method, payment_status, due_amount, narration,
-                            payment_type, transaction_type, payment_amount, exchange_material, gold_weight, gold_amount
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                            payment_type, transaction_type, payment_amount, exchange_material, gold_weight, gold_amount,
+                            created_by
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
                         $stmt = $conn->prepare($sql);
                         $user_id = $_SESSION['user_id'];
                         $gold_weight = $issue_weight; // delivered weight
                         $gold_amount = $amount;
                         $stmt->bind_param(
-                            "iisisdddddddssdsssdsdd",
+                            "iisisdddddddssdsssdsddi",
                             $company_id,
                             $user_id,
                             $receipt_id,
@@ -885,7 +871,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $payment_amount,
                             $exchange_material,
                             $gold_weight,
-                            $gold_amount
+                            $gold_amount,
+                            $user_id
                         );
                     }
 
@@ -941,12 +928,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $linked_sql = "INSERT INTO transactions (
                             company_id, user_id, receipt_id, party_id, date_of_transaction,
                             transaction_type, payment_type, payment_method, payment_amount,
-                            narration, payment_status, due_amount, amount
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Paid', 0, ?)";
+                            narration, payment_status, due_amount, amount, created_by
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Paid', 0, ?, ?)";
 
                         $linked_stmt = $conn->prepare($linked_sql);
                         $linked_stmt->bind_param(
-                            "iisissssdsd",
+                            "iisissssdsdi",
                             $company_id,
                             $user_id,
                             $linked_receipt_id,
@@ -957,7 +944,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $payment_method,
                             $payment_amount,
                             $linked_narration,
-                            $payment_amount
+                            $payment_amount,
+                            $user_id
                         );
 
                         if (!$linked_stmt->execute()) {
@@ -1806,13 +1794,6 @@ $exchange_list_has_more = $total_transactions > count($transactions);
             background: rgba(148, 163, 184, 0.18);
         }
 
-        .ge-txn-table .ge-action-col {
-            width: 3rem;
-            min-width: 3rem;
-            padding-left: 0.2rem !important;
-            padding-right: 0.3rem !important;
-        }
-
         /* Keep the Recent Transactions list within a fixed viewport height and scroll internally
            instead of growing the whole page when there are many transactions for the day. */
         .ge-txn-scroll {
@@ -1820,6 +1801,7 @@ $exchange_list_has_more = $total_transactions > count($transactions);
             min-height: 220px;
             overflow-y: auto;
             overflow-x: auto;
+            padding-bottom: 0.35rem;
         }
 
         .ge-txn-scroll thead th {
@@ -1830,31 +1812,70 @@ $exchange_list_has_more = $total_transactions > count($transactions);
             box-shadow: 0 1px 0 #e2e8f0;
         }
 
+        .ge-txn-table {
+            table-layout: fixed;
+            width: 100%;
+            min-width: 520px;
+        }
+
         .ge-txn-table thead th {
             white-space: nowrap;
         }
 
+        /* Explicit percentage widths on every column so headers align evenly
+           (previously only some columns had widths, leaving a large visual gap
+           between Party and Rcv.Wt). */
+        .ge-txn-table col.ge-serial-col { width: 4%; }
+        .ge-txn-table col.ge-id-col { width: 12%; }
+        .ge-txn-table col.ge-party-col { width: 16%; }
+        .ge-txn-table col.ge-rcv-col { width: 10%; }
+        .ge-txn-table col.ge-purity-col { width: 9%; }
+        .ge-txn-table col.ge-fine-col { width: 14%; }
+        .ge-txn-table col.ge-issue-col { width: 11%; }
+        .ge-txn-table col.ge-amount-col { width: 14%; }
+        .ge-txn-table col.ge-action-col { width: 10%; }
+
         .ge-txn-table .ge-serial-col {
-            width: 1.75rem;
-            min-width: 1.75rem;
             padding-left: 0.35rem !important;
             padding-right: 0.25rem !important;
             text-align: center;
         }
 
         .ge-txn-table .ge-party-col {
-            width: 5.75rem;
-            max-width: 5.75rem;
             padding-left: 0.3rem !important;
             padding-right: 0.3rem !important;
         }
 
-        /* Tighten the horizontal gap between every other column so the extra
-           room freed up here can go to the Party column above instead. */
+        .ge-txn-table .ge-purity-col {
+            white-space: nowrap;
+        }
+
+        .ge-txn-table .ge-action-col {
+            padding-left: 0.2rem !important;
+            padding-right: 0.3rem !important;
+        }
+
         .ge-txn-table td,
         .ge-txn-table th {
             padding-left: 0.35rem;
             padding-right: 0.35rem;
+        }
+
+        .ge-txn-table .ge-party-col > div {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .ge-pay-badge {
+            display: inline-block;
+            font-size: 7px;
+            line-height: 1.1;
+            padding: 0 0.2rem;
+            border-radius: 0.15rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: -0.02em;
         }
 
         .ge-txn-scroll::-webkit-scrollbar {
@@ -2334,7 +2355,7 @@ $exchange_list_has_more = $total_transactions > count($transactions);
                                     class="block w-full pl-7 pr-1 py-1.5 text-[11px] font-semibold text-gray-900 bg-white border border-gray-200 rounded focus:ring-1 focus:ring-gray-400 focus:border-gray-400 compact-input"
                                     name="payment_method">
                                     <option value="Cash">Cash</option>
-                                    <option value="Bank Transfer">Bank</option>
+                                    <option value="Bank">Bank</option>
                                     <option value="Cheque">Cheque</option>
                                     <option value="UPI">UPI</option>
                                 </select>
@@ -2407,15 +2428,27 @@ $exchange_list_has_more = $total_transactions > count($transactions);
                 <div class="p-2">
                     <div class="ge-txn-scroll" id="geTxnScroll">
                         <table class="w-full text-sm text-left text-gray-500 ge-txn-table">
+                            <colgroup>
+                                <col class="ge-serial-col">
+                                <col class="ge-id-col">
+                                <col class="ge-party-col">
+                                <col class="ge-rcv-col">
+                                <col class="ge-purity-col">
+                                <col class="ge-fine-col">
+                                <col class="ge-issue-col">
+                                <col class="ge-amount-col">
+                                <col class="ge-action-col">
+                            </colgroup>
                             <thead class="bg-slate-50 border-b border-slate-100">
                                 <tr>
                                     <th class="py-2 px-1 text-center text-[9px] font-bold text-slate-500 ge-serial-col">#</th>
-                                    <th class="py-2 px-2 text-left text-[9px] font-bold text-slate-500 w-16">Id</th>
+                                    <th class="py-2 px-2 text-left text-[9px] font-bold text-slate-500 ge-id-col">Id</th>
                                     <th class="py-2 px-2 text-left text-[9px] font-bold text-slate-500 ge-party-col">Party</th>
-                                    <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500">Rcv.Wt</th>
-                                    <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500">Fine Wt</th>
-                                    <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500">Issue Wt</th>
-                                    <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500">Amount</th>
+                                    <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500 ge-rcv-col">Rcv.Wt</th>
+                                    <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500 ge-purity-col">Purity</th>
+                                    <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500 ge-fine-col">Fine Wt</th>
+                                    <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500 ge-issue-col">Issue Wt</th>
+                                    <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500 ge-amount-col">Amount</th>
                                     <th class="py-2 px-2 text-right text-[9px] font-bold text-slate-500 ge-action-col">Action</th>
                                 </tr>
                             </thead>
@@ -2455,7 +2488,7 @@ $exchange_list_has_more = $total_transactions > count($transactions);
                                             </td>
 
                                             <!-- ID, Date & Time -->
-                                            <td class="py-1.5 px-2 align-top group">
+                                            <td class="py-1.5 px-2 align-top group ge-id-col">
                                                 <div
                                                     class="text-[10px] font-bold text-blue-600 group-hover:underline truncate flex items-center gap-0.5">
                                                     <span class="truncate">#<?= htmlspecialchars($t['receipt_id']) ?></span>
@@ -2480,29 +2513,38 @@ $exchange_list_has_more = $total_transactions > count($transactions);
                                                     <?= htmlspecialchars($t['party_name']) ?></div>
                                             </td>
 
-                                            <!-- Weight & Purity -->
-                                            <td class="py-1.5 px-2 align-top text-right">
+                                            <!-- Weight -->
+                                            <td class="py-1.5 px-2 align-top text-right ge-rcv-col">
                                                 <?php if ($is_multi_item_row): ?>
                                                     <div class="space-y-0.5">
                                                         <?php foreach ($row_items as $ri): ?>
-                                                            <div class="flex items-baseline justify-end gap-1 whitespace-nowrap">
-                                                                <span class="text-[9px] font-bold text-slate-700 leading-none"><?= number_format($ri['weight'], 3) ?><span
-                                                                        class="text-[7px] font-normal ml-0.5">g</span></span>
-                                                                <span class="text-[7px] font-bold text-slate-400 uppercase"><?= number_format($ri['purity'], 2) ?>%</span>
-                                                            </div>
+                                                            <div class="text-[9px] font-bold text-slate-700 leading-none whitespace-nowrap"><?= number_format($ri['weight'], 3) ?><span
+                                                                    class="text-[7px] font-normal ml-0.5">g</span></div>
                                                         <?php endforeach; ?>
                                                     </div>
                                                 <?php else: ?>
                                                     <div class="text-[10px] font-bold text-slate-700 leading-none">
                                                         <?= number_format($t['received_weight'], 3) ?><span
                                                             class="text-[8px] font-normal ml-0.5">g</span></div>
-                                                    <div class="text-[8px] font-bold text-slate-400 uppercase mt-0.5">
+                                                <?php endif; ?>
+                                            </td>
+
+                                            <!-- Purity -->
+                                            <td class="py-1.5 px-2 align-top text-right ge-purity-col">
+                                                <?php if ($is_multi_item_row): ?>
+                                                    <div class="space-y-0.5">
+                                                        <?php foreach ($row_items as $ri): ?>
+                                                            <div class="text-[9px] font-semibold text-slate-500 leading-none whitespace-nowrap"><?= number_format($ri['purity'], 2) ?>%</div>
+                                                        <?php endforeach; ?>
+                                                    </div>
+                                                <?php else: ?>
+                                                    <div class="text-[10px] font-semibold text-slate-500 leading-none whitespace-nowrap">
                                                         <?= number_format($display_purity, 2) ?>%</div>
                                                 <?php endif; ?>
                                             </td>
 
                                             <!-- Fine & Rate -->
-                                            <td class="py-1.5 px-2 align-top text-right">
+                                            <td class="py-1.5 px-2 align-top text-right ge-fine-col">
                                                 <?php if ($is_multi_item_row): ?>
                                                     <div class="space-y-0.5">
                                                         <?php foreach ($row_items as $ri): ?>
@@ -2523,7 +2565,7 @@ $exchange_list_has_more = $total_transactions > count($transactions);
                                             </td>
 
                                             <!-- Issue & Diff -->
-                                            <td class="py-1.5 px-2 align-top text-right">
+                                            <td class="py-1.5 px-2 align-top text-right ge-issue-col">
                                                 <div class="text-[10px] font-semibold text-slate-600 leading-none">
                                                     <?= number_format($t['delivered_weight'], 3) ?><span
                                                         class="text-[8px] font-normal ml-0.5">g</span></div>
@@ -2533,16 +2575,16 @@ $exchange_list_has_more = $total_transactions > count($transactions);
                                             </td>
 
                                             <!-- Bill & Status -->
-                                            <td class="py-1.5 px-2 align-top text-right">
+                                            <td class="py-1.5 px-2 align-top text-right ge-amount-col">
                                                 <div class="text-[10px] font-bold text-slate-800 leading-none">
                                                     ₹<?= number_format($t['amount'], 0) ?></div>
-                                                <div class="mt-1">
+                                                <div class="mt-1 flex justify-end">
                                                     <?php if ($t['payment_amount'] >= $t['amount']): ?>
                                                         <span
-                                                            class="text-[7.5px] px-1 py-0.5 rounded bg-green-100 text-green-700 font-bold uppercase tracking-tighter">Paid</span>
+                                                            class="ge-pay-badge bg-green-100 text-green-700">Paid</span>
                                                     <?php else: ?>
                                                         <span
-                                                            class="text-[7.5px] px-1 py-0.5 rounded bg-rose-100 text-rose-700 font-bold uppercase tracking-tighter">Due</span>
+                                                            class="ge-pay-badge bg-rose-100 text-rose-700">Due</span>
                                                     <?php endif; ?>
                                                 </div>
                                             </td>
@@ -2566,7 +2608,7 @@ $exchange_list_has_more = $total_transactions > count($transactions);
                                     <?php endforeach;
                                 else: ?>
                                     <tr>
-                                        <td colspan="8" class="text-center py-8 text-gray-500">
+                                        <td colspan="9" class="text-center py-8 text-gray-500">
                                             <i class="fas fa-inbox text-2xl mb-2"></i><br>
                                             No transactions found
                                         </td>

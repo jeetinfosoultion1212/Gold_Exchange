@@ -2173,8 +2173,12 @@ $payment_list_has_more = $total_transactions > count($transactions_list);
             // Print payment button handler
             $(document).on('click', '.print-payment-btn', function() {
                 const transactionId = $(this).data('id');
-                // Open print page in new window
-                window.open('print_payment_receipt.php?id=' + transactionId, '_blank');
+                const url = 'print_payment_receipt.php?id=' + encodeURIComponent(transactionId);
+                if (window.GePrint && typeof window.GePrint.printReceipt === 'function') {
+                    window.GePrint.printReceipt(url);
+                } else {
+                    window.open(url, '_blank');
+                }
             });
 
             function confirmAndDeletePayment(transactionId, receiptLabel, amount) {

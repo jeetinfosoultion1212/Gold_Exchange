@@ -642,9 +642,7 @@ $(document).ready(function() {
 // Print receipt
 function printReceipt() {
     const printContent = document.querySelector('.receipt').cloneNode(true);
-    const printWindow = window.open('', '', 'width=800,height=600');
-    
-    printWindow.document.write(`
+    const htmlDoc = `
         <!DOCTYPE html>
         <html>
         <head>
@@ -912,8 +910,15 @@ function printReceipt() {
             </div>
         </body>
         </html>
-    `);
+    `;
 
+    if (window.GePrint && typeof window.GePrint.printHtml === 'function') {
+        window.GePrint.printHtml(htmlDoc);
+        return;
+    }
+
+    const printWindow = window.open('', '', 'width=800,height=600');
+    printWindow.document.write(htmlDoc);
     printWindow.document.close();
     printWindow.focus();
     

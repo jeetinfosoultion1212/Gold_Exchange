@@ -17,6 +17,9 @@ $company_id = $_SESSION['company_id'] ?? 1;
 $company_name = $_SESSION['company_name'] ?? 'Gold Trading Company';
 
 require_once __DIR__ . '/config/database.php';
+require_once __DIR__ . '/helpers/desktop_print_helper.php';
+
+$silentPrint = ge_wants_silent_print();
 
 $transaction_id = $_GET['id'] ?? null;
 if (!$transaction_id) {
@@ -59,11 +62,8 @@ $h = static function ($str) {
     return htmlspecialchars((string) ($str ?? ''), ENT_QUOTES, 'UTF-8');
 };
 
-// HTML print preview (popup + browser print dialog) - same approach as the
-// Exchange receipt, so window.print() actually fires in Chrome's viewer
-// (Chrome ignores PDF-embedded print(true) JS, which is why the old
-// straight-to-PDF flow never showed a print button/dialog automatically).
-if (!isset($_GET['format']) || $_GET['format'] !== 'pdf') {
+// HTML print preview (browser only)
+if (!$silentPrint && (!isset($_GET['format']) || $_GET['format'] !== 'pdf')) {
     header('Content-Type: text/html; charset=UTF-8');
     ?>
 <!DOCTYPE html>
@@ -138,7 +138,9 @@ if (!isset($_GET['format']) || $_GET['format'] !== 'pdf') {
     </div>
     <script>
         window.addEventListener('load', function () {
+        if (!window.GE_ELECTRON_APP) {
             setTimeout(function () { window.print(); }, 300);
+        }
         });
     </script>
 </body>
@@ -278,12 +280,18 @@ function renderThermalReceipt($pdf, $company_name, $transaction, $date, $time) {
 // Generate single copy
 renderThermalReceipt($pdf, $company_name, $transaction, $date, $time);
 
-// Auto-trigger print dialog
-$pdf->SetViewerPreferences(array('PrintScaling' => 'None'));
-$pdf->IncludeJS('print(true);');
-
-while (ob_get_level()) { 
-    ob_end_clean(); 
+if (!$silentPrint) {
+    $pdf->SetViewerPreferences(array('PrintScaling' => 'None'));
+    $pdf->IncludeJS('print(true);');
 }
+
+while (ob_get_level()) {
+    ob_end_clean();
+}
+
+if ($silentPrint) {
+    ge_finish_silent_print(ge_silent_print_pdf_string($pdf->Output('', 'S')));
+}
+
 $pdf->Output('sale_receipt_' . $transaction['receipt_id'] . '.pdf', 'I');
 exit;

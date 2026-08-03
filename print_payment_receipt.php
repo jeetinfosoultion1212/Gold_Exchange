@@ -17,6 +17,9 @@ $company_id = $_SESSION['company_id'] ?? 1;
 $company_name = $_SESSION['company_name'] ?? 'Gold Trading Company';
 
 require_once __DIR__ . '/config/database.php';
+require_once __DIR__ . '/helpers/desktop_print_helper.php';
+
+$silentPrint = ge_wants_silent_print();
 
 $transaction_id = $_GET['id'] ?? null;
 if (!$transaction_id) {
@@ -152,12 +155,18 @@ function renderThermalReceipt($pdf, $company_name, $transaction, $date, $time) {
 // Generate receipt
 renderThermalReceipt($pdf, $company_name, $transaction, $date, $time);
 
-// Auto-trigger print
-$pdf->SetViewerPreferences(array('PrintScaling' => 'None'));
-$pdf->IncludeJS('print(true);');
-
-while (ob_get_level()) { 
-    ob_end_clean(); 
+if (!$silentPrint) {
+    $pdf->SetViewerPreferences(array('PrintScaling' => 'None'));
+    $pdf->IncludeJS('print(true);');
 }
+
+while (ob_get_level()) {
+    ob_end_clean();
+}
+
+if ($silentPrint) {
+    ge_finish_silent_print(ge_silent_print_pdf_string($pdf->Output('', 'S')));
+}
+
 $pdf->Output('payment_receipt_' . $transaction['receipt_id'] . '.pdf', 'I');
 exit;

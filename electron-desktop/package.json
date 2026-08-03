@@ -1,0 +1,60 @@
+{
+  "name": "gold-exchange-desktop",
+  "productName": "Gold Exchange",
+  "version": "1.0.0",
+  "description": "Gold Exchange offline desktop application",
+  "main": "src/main.js",
+  "author": "Gold Exchange",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "prepare-server": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-server.ps1",
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "pack": "electron-builder --dir",
+    "build": "electron-builder --win --x64",
+    "build:portable": "electron-builder --win portable --x64"
+  },
+  "build": {
+    "appId": "com.goldexchange.desktop",
+    "productName": "Gold Exchange",
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "server",
+        "to": "server",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "GoldExchange-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Gold Exchange"
+    },
+    "portable": {
+      "artifactName": "GoldExchange-Portable-${version}.${ext}"
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  }
+}

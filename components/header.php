@@ -69,6 +69,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
                     ['personal_expense.php', 'yellow', 'wallet', 'EXPENSE', 'F8'],
                     ['payment_send.php', 'red', 'paper-plane', 'SEND', 'F11'],
                     ['party_ledger.php', 'pink', 'users', 'LEDGER', 'F6'],
+                    ['logo_marking.php', 'indigo', 'stamp', 'LOGO', 'F10'],
                     ['report.php', 'teal', 'chart-line', 'REPORT', 'F9'],
                     ['settings.php', 'slate', 'cog', 'SETTINGS', 'F7']
                 ];
@@ -93,6 +94,7 @@ $current_page = basename($_SERVER['PHP_SELF']);
                         'red' => 'from-red-500 to-red-600 hover:from-red-600 hover:to-red-700',
                         'pink' => 'from-pink-500 to-pink-600 hover:from-pink-600 hover:to-pink-700',
                         'teal' => 'from-teal-500 to-teal-600 hover:from-teal-600 hover:to-teal-700',
+                        'indigo' => 'from-indigo-500 to-indigo-600 hover:from-indigo-600 hover:to-indigo-700',
                         'slate' => 'from-slate-500 to-slate-600 hover:from-slate-600 hover:to-slate-700'
                     ];
                     $bgClass = $colorMap[$color] ?? $colorMap['slate'];
@@ -219,6 +221,12 @@ document.addEventListener('keydown', function(event) {
         event.preventDefault();
         event.stopPropagation();
         window.location.href = 'report.php';
+        return;
+    }
+    if (key === 'F10' || event.code === 'F10') {
+        event.preventDefault();
+        event.stopPropagation();
+        window.location.href = 'logo_marking.php';
         return;
     }
     if (key === 'F11' || event.code === 'F11') {

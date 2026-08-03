@@ -1686,6 +1686,9 @@ $total_transactions = $transactions ? $transactions->num_rows : 0;
         function openPurchaseReceiptPrint(transactionId) {
             if (!transactionId) return null;
             const url = 'print_purchase_receipt.php?id=' + encodeURIComponent(transactionId);
+            if (window.GePrint && typeof window.GePrint.printReceipt === 'function') {
+                return window.GePrint.printReceipt(url);
+            }
             const width = Math.min(1100, window.screen.availWidth - 20);
             const height = Math.min(820, window.screen.availHeight - 40);
             const left = window.screenX + Math.max(0, (window.outerWidth - width) / 2);
@@ -2085,6 +2088,11 @@ $total_transactions = $transactions ? $transactions->num_rows : 0;
                 </html>
             `;
             
+            if (window.GePrint && typeof window.GePrint.printHtml === 'function') {
+                window.GePrint.printHtml(printContent);
+                return;
+            }
+
             const printWindow = window.open('', '_blank');
             printWindow.document.write(printContent);
             printWindow.document.close();

@@ -61,6 +61,13 @@ $current_page = basename($_SERVER['PHP_SELF']);
         <i class="fas fa-users text-xl"></i>
     </a>
 
+    <!-- Logo Marking Icon (F10) -->
+    <a href="logo_marking.php"
+       class="w-12 h-12 flex items-center justify-center rounded-lg transition-all duration-200 <?= $current_page === 'logo_marking.php' ? 'bg-indigo-500/20 text-indigo-300' : 'text-indigo-200 hover:text-indigo-300 hover:bg-indigo-500/10' ?>"
+       title="Logo Marking (F10)">
+        <i class="fas fa-stamp text-xl"></i>
+    </a>
+
     <!-- Daily Report Icon (F9) -->
     <a href="report.php" 
        class="w-12 h-12 flex items-center justify-center rounded-lg transition-all duration-200 <?= $current_page === 'report.php' ? 'bg-teal-500/20 text-teal-300' : 'text-teal-200 hover:text-teal-300 hover:bg-teal-500/10' ?>"
